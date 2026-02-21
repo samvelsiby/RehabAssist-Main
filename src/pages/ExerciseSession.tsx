@@ -103,43 +103,54 @@ export default function ExerciseSession() {
   const setsDoneToday = todayLogs.filter(l => l.assigned_exercise_id === assignmentId).length;
   const currentSetNumber = setsDoneToday + 1;
 
-  // ── State ──────────────────────────────────────────────────────────────────
+  // ── State ────────────────────────────────────────────────────────────────
   const [side, setSide] = useState<Side>('left');
   const [cameraOn, setCameraOn] = useState(false);
   const [voiceOn, setVoiceOn] = useState(true);
   const [currentResult, setCurrentResult] = useState<AnalyzerResult | null>(null);
   const [statusText, setStatusText] = useState('Ready');
 
-  // Per-set rep tracking (setBaseCorrect = correct count at start of current set)
+  // Per-set rep tracking
   const [currentSet, setCurrentSet] = useState(currentSetNumber);
   const [setBaseCorrect, setSetBaseCorrect] = useState(0);
   const [isResting, setIsResting] = useState(false);
   const [restSecondsLeft, setRestSecondsLeft] = useState(0);
   const restIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // Session summary state
+  const [sessionSummary, setSessionSummary] = useState<string | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
+
+  // Accumulated session data for the summary
+  const setLogsRef = useRef<Array<{
+    setNumber: number; correctReps: number; incorrectReps: number;
+    formScore: number; issues: string[];
+  }>>([]);
+  const sessionIssueCountRef = useRef<Map<string, number>>(new Map());
+  const currentSetIssuesRef = useRef<Set<string>>(new Set());
+
   const repsInSet = Math.max(0, (currentResult?.correct ?? 0) - setBaseCorrect);
   const targetReps = rules?.minRepsPerSet ?? 10;
   const targetSets = assignment?.sets ?? rules?.targetSets ?? 3;
   const allSetsDone = currentSet > targetSets;
 
-  // ── Refs ───────────────────────────────────────────────────────────────────
+  // ── Refs ─────────────────────────────────────────────────────────────────
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const demoRef = useRef<HTMLCanvasElement>(null);
   const demoRafRef = useRef<number | null>(null);
 
-  // ── Voice + Gemini coach ───────────────────────────────────────────────────
+  // ── Voice + Gemini coach ──────────────────────────────────────────────────
   const { announce, announceFeedback, announceRep, cancel: cancelVoice } = useVoiceAssistant(voiceOn);
+  const API_KEY = import.meta.env.VITE_GEMINI_API_KEY as string | undefined;
 
-  const { coachSetComplete, coachSessionComplete, coachFormIssue, isEnabled: geminiEnabled } =
+  const { coachSetComplete, coachSessionComplete, coachFormIssue, generateSessionSummary } =
     useGeminiCoach({
-      onCoach: (text) => {
-        if (voiceOn) announce(text);
-      },
+      onCoach: (text) => { if (voiceOn) announce(text); },
       enabled: voiceOn,
     });
 
-  // Track feedback for Gemini (changes, not every frame)
+  // Track feedback changes for Gemini live coaching
   const lastFeedbackRef = useRef<string>('');
   const formIssueCountRef = useRef(0);
 
@@ -155,6 +166,7 @@ export default function ExerciseSession() {
   const startCamera = useCallback(async () => {
     try {
       setStatusText('Starting camera…');
+
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: 'user', width: { ideal: 960 }, height: { ideal: 540 } },
       });
@@ -247,17 +259,46 @@ export default function ExerciseSession() {
       });
     }
 
+    // Collect form issues for summary
+    const issuesThisSet = Array.from(currentSetIssuesRef.current);
+    currentSetIssuesRef.current.clear();
+
+    // Record this set in session log
+    setLogsRef.current.push({
+      setNumber: currentSet,
+      correctReps: correctInSet,
+      incorrectReps: incorrectInSet,
+      formScore,
+      issues: issuesThisSet,
+    });
+
     if (currentSet >= targetSets) {
-      // Session done — Gemini gives final summary
+      // ── Session done: voice announcement + generate written summary ──────
       if (voiceOn) {
         coachSessionComplete({
           totalSets: targetSets,
-          totalCorrect: correctInSet, // simplified — could sum across sets
-          totalReps: totalInSet,
+          totalCorrect: setLogsRef.current.reduce((s, e) => s + e.correctReps, 0),
+          totalReps: setLogsRef.current.reduce((s, e) => s + e.correctReps + e.incorrectReps, 0),
           exerciseName: exerciseName ?? 'exercise',
         });
       } else {
         announce('All sets complete! Excellent work!');
+      }
+
+      // Generate detailed written summary with Gemini
+      if (API_KEY) {
+        setSummaryLoading(true);
+        const allIssues = Array.from(sessionIssueCountRef.current.entries())
+          .map(([issue, count]) => ({ issue, count }))
+          .sort((a, b) => b.count - a.count);
+        generateSessionSummary({
+          exerciseName: exerciseName ?? 'Exercise',
+          sets: setLogsRef.current,
+          allIssues,
+        }).then(text => {
+          setSessionSummary(text || null);
+          setSummaryLoading(false);
+        });
       }
     } else {
       // Set done — Gemini gives per-set coaching
@@ -284,9 +325,15 @@ export default function ExerciseSession() {
     announceFeedback(currentResult.feedback);
     announceRep(currentResult.correct - setBaseCorrect, targetReps);
 
-    // If the same form issue has persisted 4+ frames, ask Gemini for a tip
+    // Accumulate form issues for session summary
     const issue = currentResult.feedback?.[0] ?? '';
-    if (issue && issue !== 'Good form!' && issue !== 'Waiting for pose…') {
+    if (issue && issue !== 'Good form!' && issue !== 'Waiting for pose…' && issue !== 'No pose detected') {
+      // Track per-set issues
+      currentSetIssuesRef.current.add(issue);
+      // Track session-wide issue frequency
+      sessionIssueCountRef.current.set(issue, (sessionIssueCountRef.current.get(issue) ?? 0) + 1);
+
+      // Ask Gemini for a coaching tip after 4 consecutive same-issue frames
       if (issue === lastFeedbackRef.current) {
         formIssueCountRef.current += 1;
         if (formIssueCountRef.current === 4 && isAnalyzing) {
@@ -376,27 +423,105 @@ export default function ExerciseSession() {
               {rules && <> · {targetReps} reps per set · {rules.restBetweenSets}s rest</>}
             </p>
           </div>
-          {/* Voice toggle */}
-          <Button
-            variant="outline" size="sm"
-            onClick={() => { setVoiceOn(v => !v); if (voiceOn) cancelVoice(); }}
-            className={voiceOn ? 'border-primary text-primary' : 'text-muted-foreground'}
-          >
-            {voiceOn ? <Volume2 className="h-4 w-4 mr-1" /> : <VolumeX className="h-4 w-4 mr-1" />}
-            {voiceOn ? 'Voice On' : 'Voice Off'}
-          </Button>
-        </div>
+          {/* Voice controls */}
+          <div className="flex items-center gap-2">
+            {/* Direct TTS test — bypasses all hook logic */}
+            <Button
+              variant="outline" size="sm"
+              className="text-xs text-muted-foreground"
+              onClick={() => {
+                const ss = window.speechSynthesis;
+                console.log('[VoiceTest] ss exists:', !!ss, '| voices:', ss?.getVoices()?.length, '| speaking:', ss?.speaking);
+                // DO NOT call cancel() here — it causes onerror:canceled on the next speak()
+                const u = new SpeechSynthesisUtterance('Voice test one two three');
+                u.onstart = () => console.log('[VoiceTest] ✅ onstart fired — audio is starting');
+                u.onend = () => console.log('[VoiceTest] ✅ onend fired — audio completed');
+                u.onerror = (e) => console.error('[VoiceTest] ❌ onerror:', e.error);
+                ss?.speak(u);
+                console.log('[VoiceTest] speak() called. pending:', ss?.pending);
+              }}
+            >
+              🔊 Test
+            </Button>
+            <Button
+              variant="outline" size="sm"
+              onClick={() => { setVoiceOn(v => !v); if (voiceOn) cancelVoice(); }}
+              className={voiceOn ? 'border-primary text-primary' : 'text-muted-foreground'}
+            >
+              {voiceOn ? <Volume2 className="h-4 w-4 mr-1" /> : <VolumeX className="h-4 w-4 mr-1" />}
+              {voiceOn ? 'Voice On' : 'Voice Off'}
+            </Button>
+          </div>
+        </div> {/* ← closes mb-5 header div */}
 
-        {/* All sets done */}
+        {/* All sets done — AI Summary */}
         {allSetsDone ? (
-          <div className="glass rounded-xl p-10 text-center">
-            <CheckCircle2 className="h-16 w-16 text-green-400 mx-auto mb-4" />
-            <h2 className="font-display text-2xl font-bold text-green-400 mb-2">All {targetSets} Sets Complete! 🎉</h2>
-            <p className="text-muted-foreground mb-6">Outstanding work. Your session has been saved.</p>
-            <Button onClick={() => navigate('/dashboard')} className="bg-primary text-primary-foreground">
+          <div className="glass rounded-xl p-8 max-w-2xl mx-auto">
+            <div className="text-center mb-6">
+              <CheckCircle2 className="h-14 w-14 text-green-400 mx-auto mb-3" />
+              <h2 className="font-display text-2xl font-bold text-green-400">All {targetSets} Sets Complete! 🎉</h2>
+              <p className="text-muted-foreground text-sm mt-1">Your session has been saved to your profile</p>
+            </div>
+
+            {/* Per-set quick stats */}
+            <div className="grid grid-cols-3 gap-3 mb-6">
+              {setLogsRef.current.map(s => {
+                const total = s.correctReps + s.incorrectReps;
+                const acc = total > 0 ? Math.round((s.correctReps / total) * 100) : 100;
+                return (
+                  <div key={s.setNumber} className="text-center p-3 rounded-lg bg-secondary/30">
+                    <p className="text-xs text-muted-foreground">Set {s.setNumber}</p>
+                    <p className={`font-display text-xl font-bold ${acc >= 80 ? 'text-success' : 'text-warning'}`}>{acc}%</p>
+                    <p className="text-xs text-muted-foreground">{s.correctReps}/{total} correct</p>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Gemini AI Summary */}
+            <div className="rounded-lg border border-primary/20 bg-primary/5 p-5 mb-6">
+              <div className="flex items-center gap-2 mb-3">
+                <Sparkles className="h-4 w-4 text-primary" />
+                <span className="text-sm font-semibold text-primary">AI Session Summary</span>
+              </div>
+
+              {summaryLoading ? (
+                <div className="flex items-center gap-3 py-4">
+                  <div className="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                  <span className="text-sm text-muted-foreground">Gemini is analysing your session…</span>
+                </div>
+              ) : sessionSummary ? (
+                /* Render markdown sections as styled text */
+                <div className="prose prose-sm prose-invert max-w-none text-sm leading-relaxed space-y-3">
+                  {sessionSummary.split('\n').map((line, i) => {
+                    if (line.startsWith('## ')) return (
+                      <h3 key={i} className="font-semibold text-foreground mt-4 mb-1 text-base">{line.replace('## ', '')}</h3>
+                    );
+                    if (line.startsWith('- ')) return (
+                      <p key={i} className="text-muted-foreground pl-3 border-l-2 border-primary/30">{line.replace('- ', '')}</p>
+                    );
+                    if (line.startsWith('**') && line.endsWith('**')) return (
+                      <p key={i} className="font-medium text-foreground">{line.replace(/\*\*/g, '')}</p>
+                    );
+                    return line.trim() ? (
+                      <p key={i} className="text-muted-foreground">{line}</p>
+                    ) : null;
+                  })}
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  {API_KEY
+                    ? 'Summary generation failed — check your Gemini API key.'
+                    : 'Add VITE_GEMINI_API_KEY to .env.local to enable AI summaries.'}
+                </p>
+              )}
+            </div>
+
+            <Button onClick={() => navigate('/dashboard')} className="w-full bg-primary text-primary-foreground">
               Back to Dashboard
             </Button>
           </div>
+
         ) : (
           <section className="grid lg:grid-cols-[1.9fr_1fr] gap-4">
 

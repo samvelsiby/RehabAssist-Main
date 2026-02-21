@@ -1,35 +1,44 @@
 /**
  * useGeminiCoach
- * Uses Gemini 2.0 Flash to generate intelligent, contextual physiotherapy
- * coaching advice at key session events (set complete, form tip, session done).
+ * Uses Gemini 2.0 Flash to generate:
+ *  1. Real-time spoken coaching (1-2 sentences after each set / form issue)
+ *  2. Detailed written session summary (displayed as a card after session ends)
  *
  * Requires VITE_GEMINI_API_KEY in .env.local
- *
- * Architecture:
- *   Gemini generates coaching TEXT  →  browser speechSynthesis speaks it
- *   (not using Gemini Live streaming Audio - kept simple & reliable)
  */
 import { useCallback, useRef } from 'react';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
 const API_KEY = import.meta.env.VITE_GEMINI_API_KEY as string | undefined;
 
-// System-level instructions baked into every request
-const SYSTEM_INSTRUCTION = `You are a friendly, experienced physiotherapy exercise coach.
-Your responses will be spoken aloud to a patient doing rehabilitation exercises.
-Rules:
-- Maximum 2 sentences, ideally 1.
-- Spoken language only — no bullet points, markdown, emojis, or special characters.
-- Be specific, positive, and clinically appropriate.
-- If accuracy is high (>= 85%), focus on encouragement.
-- If accuracy is lower, give ONE clear form cue.
-- Never say "great job" twice in a row — vary your language.`;
+const SPOKEN_SYSTEM = `You are a friendly physiotherapy exercise coach.
+Responses will be spoken aloud. Rules:
+- Maximum 2 sentences.
+- Spoken language only — no bullet points, markdown, or special characters.
+- Be specific, positive, and clinically sound.
+- Vary your wording, don't repeat the same phrase twice.`;
+
+const SUMMARY_SYSTEM = `You are an expert physiotherapy exercise coach writing a post-session report.
+Format your response in clean markdown with these sections:
+## Overall Performance
+## What You Did Well
+## Form Issues Detected  
+## How to Improve
+## Next Session Focus
+Be specific, clinical, and encouraging. Use bullet points within sections.
+Reference the exact form issues provided. Keep the whole summary under 300 words.`;
 
 export interface GeminiCoachOptions {
-    // called when Gemini has generated text — pass this to your TTS speak function
     onCoach: (text: string) => void;
-    // Gemini coaching enabled? (e.g. user toggled voice off)
     enabled?: boolean;
+}
+
+export interface SetLogEntry {
+    setNumber: number;
+    correctReps: number;
+    incorrectReps: number;
+    formScore: number;
+    issues: string[];  // form feedback messages that appeared during this set
 }
 
 export function useGeminiCoach({ onCoach, enabled = true }: GeminiCoachOptions) {
@@ -42,71 +51,72 @@ export function useGeminiCoach({ onCoach, enabled = true }: GeminiCoachOptions) 
 
     const isEnabled = enabled && !!API_KEY;
 
-    // ── Core Gemini call ──────────────────────────────────────────────────────
-    const generate = useCallback(async (prompt: string) => {
+    // ── Core: short spoken coaching ────────────────────────────────────────────
+    const generateSpoken = useCallback(async (prompt: string): Promise<void> => {
         if (!genAI.current || !isEnabled || isGenerating.current) return;
         isGenerating.current = true;
         try {
             const model = genAI.current.getGenerativeModel({
                 model: 'gemini-2.0-flash',
-                systemInstruction: SYSTEM_INSTRUCTION,
+                systemInstruction: SPOKEN_SYSTEM,
             });
             const result = await model.generateContent(prompt);
             const text = result.response.text().trim().replace(/[*_`#]/g, '');
             if (text) onCoach(text);
         } catch (err) {
-            console.warn('[GeminiCoach] API error:', err);
-            // Graceful fallback — don't crash if API key is invalid or network fails
+            console.warn('[GeminiCoach] spoken error:', err);
         } finally {
             isGenerating.current = false;
         }
     }, [isEnabled, onCoach]);
 
-    // ── Public coaching triggers ──────────────────────────────────────────────
+    // ── Core: detailed written summary ─────────────────────────────────────────
+    const generateSummaryText = useCallback(async (prompt: string): Promise<string> => {
+        if (!genAI.current || !API_KEY) return '';
+        try {
+            const model = genAI.current.getGenerativeModel({
+                model: 'gemini-2.0-flash',
+                systemInstruction: SUMMARY_SYSTEM,
+            });
+            const result = await model.generateContent(prompt);
+            return result.response.text().trim();
+        } catch (err) {
+            console.warn('[GeminiCoach] summary error:', err);
+            return '';
+        }
+    }, []);
 
-    /**
-     * Called when a set is completed.
-     * Gemini gives encouragement + 1 form tip based on accuracy.
-     */
+    // ── Public: spoken per-set coaching ────────────────────────────────────────
     const coachSetComplete = useCallback((params: {
         setNumber: number;
         totalSets: number;
         correctReps: number;
         incorrectReps: number;
         exerciseName: string;
-        formIssues: string[];  // feedback messages from the analyzer this set
+        formIssues: string[];
     }) => {
         const { setNumber, totalSets, correctReps, incorrectReps, exerciseName, formIssues } = params;
         const totalReps = correctReps + incorrectReps;
         const accuracy = totalReps > 0 ? Math.round((correctReps / totalReps) * 100) : 100;
-        const issueNote = formIssues.length > 0 ? `Common issue this set: "${formIssues[0]}".` : '';
-        const restInfo = setNumber < totalSets ? `They have ${totalSets - setNumber} sets remaining.` : '';
+        const issueNote = formIssues.length > 0 ? `Main issue: "${formIssues[0]}".` : '';
+        const restInfo = setNumber < totalSets ? `${totalSets - setNumber} sets remain.` : '';
 
-        generate(
-            `Exercise: ${exerciseName}. Set ${setNumber} of ${totalSets} completed. ` +
-            `${correctReps} correct reps, ${incorrectReps} incorrect, ${accuracy}% accuracy. ` +
-            `${issueNote} ${restInfo} Give 1-2 sentence coaching response.`
+        generateSpoken(
+            `Exercise: ${exerciseName}. Set ${setNumber}/${totalSets} done. ` +
+            `${correctReps} correct, ${incorrectReps} incorrect, ${accuracy}% accuracy. ` +
+            `${issueNote} ${restInfo}`
         );
-    }, [generate]);
+    }, [generateSpoken]);
 
-    /**
-     * Called when a persistent form issue is detected (throttled — only when the
-     * issue changes so Gemini isn't hammered on every frame).
-     */
+    // ── Public: spoken one-liner for persistent form issue ─────────────────────
     const coachFormIssue = useCallback((issue: string, exerciseName: string) => {
         if (!issue || issue === lastFormIssue.current) return;
-        if (issue === 'Good form!' || issue === 'Waiting for pose…') return;
+        if (['Good form!', 'Waiting for pose…', 'No pose detected'].includes(issue)) return;
         lastFormIssue.current = issue;
+        generateSpoken(`Exercise: ${exerciseName}. Patient has form issue: "${issue}". Give 1 brief coaching cue.`);
+    }, [generateSpoken]);
 
-        generate(
-            `Exercise: ${exerciseName}. The patient has a form issue: "${issue}". ` +
-            `Give 1 brief, clear coaching cue to fix it.`
-        );
-    }, [generate]);
-
-    /**
-     * Called when all sets are done — final motivational summary.
-     */
+    // ── Public: spoken session complete ────────────────────────────────────────
     const coachSessionComplete = useCallback((params: {
         totalSets: number;
         totalCorrect: number;
@@ -115,18 +125,48 @@ export function useGeminiCoach({ onCoach, enabled = true }: GeminiCoachOptions) 
     }) => {
         const { totalSets, totalCorrect, totalReps, exerciseName } = params;
         const accuracy = totalReps > 0 ? Math.round((totalCorrect / totalReps) * 100) : 100;
-
-        generate(
-            `Exercise: ${exerciseName}. Session complete! ${totalSets} sets done. ` +
-            `${totalCorrect} of ${totalReps} total reps were correct (${accuracy}% accuracy). ` +
-            `Give a motivating 1-2 sentence closing summary.`
+        generateSpoken(
+            `${exerciseName} session done! ${totalSets} sets, ${accuracy}% accuracy. ` +
+            `Give a 1-2 sentence motivating closing.`
         );
-    }, [generate]);
+    }, [generateSpoken]);
+
+    // ── Public: detailed written summary (returns markdown string) ─────────────
+    const generateSessionSummary = useCallback(async (params: {
+        exerciseName: string;
+        sets: SetLogEntry[];
+        allIssues: Array<{ issue: string; count: number }>; // issues + how many times flagged
+    }): Promise<string> => {
+        const { exerciseName, sets, allIssues } = params;
+
+        const totalCorrect = sets.reduce((s, e) => s + e.correctReps, 0);
+        const totalReps = sets.reduce((s, e) => s + e.correctReps + e.incorrectReps, 0);
+        const overallAcc = totalReps > 0 ? Math.round((totalCorrect / totalReps) * 100) : 100;
+
+        const setBreakdown = sets.map(s =>
+            `Set ${s.setNumber}: ${s.correctReps} correct / ${s.correctReps + s.incorrectReps} total (${s.formScore}% form score)` +
+            (s.issues.length > 0 ? `, issues: ${s.issues.join(', ')}` : '')
+        ).join('\n');
+
+        const issueList = allIssues.length > 0
+            ? allIssues.map(i => `"${i.issue}" — occurred ${i.count} time(s)`).join('\n')
+            : 'No significant form issues detected.';
+
+        const prompt =
+            `Exercise: ${exerciseName}\n` +
+            `Total sets: ${sets.length}, Total reps: ${totalReps}, Overall accuracy: ${overallAcc}%\n\n` +
+            `Per-set breakdown:\n${setBreakdown}\n\n` +
+            `Form issues flagged during session:\n${issueList}\n\n` +
+            `Write a detailed post-session summary report for this patient.`;
+
+        return generateSummaryText(prompt);
+    }, [generateSummaryText]);
 
     return {
         coachSetComplete,
         coachFormIssue,
         coachSessionComplete,
+        generateSessionSummary,
         isEnabled,
         isApiKeyMissing: !API_KEY,
     };

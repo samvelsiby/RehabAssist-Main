@@ -67,13 +67,31 @@ export function useVoiceAssistant(enabled: boolean = true) {
 
         // Watchdog: Chrome sometimes kills utterances without firing onend
         watchdogRef.current = setTimeout(() => {
-            console.warn('[Voice] watchdog fired');
+            console.warn('[Voice] watchdog fired — resuming');
             done();
             flushQueue();
-        }, 10_000);
+        }, 6_000);
 
-        // ⚡ DO NOT call speechSynthesis.cancel() here — it kills the utterance
+        // KEY FIX: Chrome pauses speechSynthesis when getUserMedia stream is active.
+        // Must call resume() before every speak() or the utterance queues but never starts.
+        if (speechSynthesis.paused) {
+            console.log('[Voice] was paused — resuming');
+            speechSynthesis.resume();
+        }
         speechSynthesis.speak(utter);
+        console.log('[Voice] spoke:', utter.text, '| paused:', speechSynthesis.paused, '| speaking:', speechSynthesis.speaking, '| pending:', speechSynthesis.pending);
+    }, []);
+
+    // Keep-alive: Chrome pauses synthesis after tab media activity.
+    // Calling resume() every 5s keeps it awake.
+    useEffect(() => {
+        if (!('speechSynthesis' in window)) return;
+        const id = setInterval(() => {
+            if (speechSynthesis.paused) {
+                speechSynthesis.resume();
+            }
+        }, 5_000);
+        return () => clearInterval(id);
     }, []);
 
     // ── Enqueue ───────────────────────────────────────────────────────────────
@@ -81,16 +99,15 @@ export function useVoiceAssistant(enabled: boolean = true) {
         if (!enabled || !('speechSynthesis' in window) || !text.trim()) return;
 
         if (priority) {
-            // Priority: cancel everything and speak this NOW
+            // Cancel, then wait for Chrome to finish processing before speaking
             speechSynthesis.cancel();
             if (watchdogRef.current) { clearTimeout(watchdogRef.current); watchdogRef.current = null; }
             isSpeakingRef.current = false;
             queueRef.current = [];
-            // Wait 100ms for cancel to settle before speaking
             setTimeout(() => {
                 queueRef.current = [{ text, priority }];
                 flushQueue();
-            }, 100);
+            }, 80); // ← 80ms delay so Chrome finishes the cancel before we speak
         } else {
             // Normal: deduplicate and cap queue
             const last = queueRef.current[queueRef.current.length - 1];
