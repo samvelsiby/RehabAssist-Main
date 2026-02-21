@@ -4,12 +4,13 @@ import DashboardLayout from '@/components/DashboardLayout';
 import { Button } from '@/components/ui/button';
 import {
   ArrowLeft, Camera, CameraOff, Activity, Volume2, VolumeX,
-  CheckCircle2, Timer, Dumbbell,
+  CheckCircle2, Timer, Dumbbell, Sparkles,
 } from 'lucide-react';
 import { useAssignedExercises, getExerciseRules, type ExerciseMode } from '@/hooks/useExercises';
 import { useLogSession, useTodaySessionLogs } from '@/hooks/useSessionLogs';
 import { useExerciseSession } from '@/hooks/useExerciseSession';
 import { useVoiceAssistant } from '@/hooks/useVoiceAssistant';
+import { useGeminiCoach } from '@/hooks/useGeminiCoach';
 import type { Side } from '@/services/exercises/mini-squat-analyzer';
 import { toast } from '@/components/ui/sonner';
 import type { AnalyzerResult } from '@/utils/exercise-geometry';
@@ -127,8 +128,20 @@ export default function ExerciseSession() {
   const demoRef = useRef<HTMLCanvasElement>(null);
   const demoRafRef = useRef<number | null>(null);
 
-  // ── Voice ──────────────────────────────────────────────────────────────────
+  // ── Voice + Gemini coach ───────────────────────────────────────────────────
   const { announce, announceFeedback, announceRep, cancel: cancelVoice } = useVoiceAssistant(voiceOn);
+
+  const { coachSetComplete, coachSessionComplete, coachFormIssue, isEnabled: geminiEnabled } =
+    useGeminiCoach({
+      onCoach: (text) => {
+        if (voiceOn) announce(text);
+      },
+      enabled: voiceOn,
+    });
+
+  // Track feedback for Gemini (changes, not every frame)
+  const lastFeedbackRef = useRef<string>('');
+  const formIssueCountRef = useRef(0);
 
   // ── Exercise hook ──────────────────────────────────────────────────────────
   const { initialize, startAnalysis, stopAnalysis, resetAnalysis, isInitialized, isAnalyzing, error: analysisError } =
@@ -235,18 +248,58 @@ export default function ExerciseSession() {
     }
 
     if (currentSet >= targetSets) {
-      announce('All sets complete! Excellent work!');
+      // Session done — Gemini gives final summary
+      if (voiceOn) {
+        coachSessionComplete({
+          totalSets: targetSets,
+          totalCorrect: correctInSet, // simplified — could sum across sets
+          totalReps: totalInSet,
+          exerciseName: exerciseName ?? 'exercise',
+        });
+      } else {
+        announce('All sets complete! Excellent work!');
+      }
     } else {
+      // Set done — Gemini gives per-set coaching
+      if (voiceOn) {
+        coachSetComplete({
+          setNumber: currentSet,
+          totalSets: targetSets,
+          correctReps: correctInSet,
+          incorrectReps: incorrectInSet,
+          exerciseName: exerciseName ?? 'exercise',
+          formIssues: currentResult?.feedback?.filter(f => f !== 'Good form!' && f !== 'Waiting for pose…') ?? [],
+        });
+      } else {
+        announce(`Set ${currentSet} complete!`);
+      }
       setSetBaseCorrect(currentResult?.correct ?? 0);
       startRest(rules.restBetweenSets);
     }
   }, [repsInSet, targetReps]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Voice: feedback + rep announcements ────────────────────────────────────
+  // ── Voice: rep counting + persistent form issue detection ────────────────
   useEffect(() => {
     if (!currentResult || !voiceOn) return;
     announceFeedback(currentResult.feedback);
     announceRep(currentResult.correct - setBaseCorrect, targetReps);
+
+    // If the same form issue has persisted 4+ frames, ask Gemini for a tip
+    const issue = currentResult.feedback?.[0] ?? '';
+    if (issue && issue !== 'Good form!' && issue !== 'Waiting for pose…') {
+      if (issue === lastFeedbackRef.current) {
+        formIssueCountRef.current += 1;
+        if (formIssueCountRef.current === 4 && isAnalyzing) {
+          coachFormIssue(issue, exerciseName ?? 'exercise');
+        }
+      } else {
+        lastFeedbackRef.current = issue;
+        formIssueCountRef.current = 1;
+      }
+    } else {
+      formIssueCountRef.current = 0;
+      lastFeedbackRef.current = '';
+    }
   }, [currentResult?.feedback?.[0], currentResult?.correct]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Demo canvas loop ────────────────────────────────────────────────────────
