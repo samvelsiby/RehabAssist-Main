@@ -85,7 +85,7 @@ export default function PhysioDashboard() {
       toast.success("Exercise assigned!");
       setAssignDialogOpen(false);
       setAssignForm({ exercise_id: "", sets: "3", reps: "12" });
-    } catch (err: any) {
+    } catch (err: unknown) {
       toast.error(err.message || "Failed to assign");
     }
   };

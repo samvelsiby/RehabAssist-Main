@@ -88,7 +88,7 @@ export function useMyPhysio() {
         .maybeSingle();
 
       if (error || !data) return null;
-      const p = data.users as any;
+      const p = data.users as { first_name?: string; last_name?: string } | null;
       return {
         id: data.physio_id,
         name: [p?.first_name, p?.last_name].filter(Boolean).join(" "),
@@ -113,7 +113,7 @@ export function useLinkedClients() {
 
       if (error) throw new Error(error.message);
       return (data || []).map((row) => {
-        const c = row.users as any;
+        const c = row.users as { first_name?: string; last_name?: string } | null;
         return {
           id: c.id,
           name: [c.first_name, c.last_name].filter(Boolean).join(" ") || c.email,

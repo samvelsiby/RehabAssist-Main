@@ -196,7 +196,7 @@ export function useAssignedExercises(clientId?: string) {
       };
 
       return (data ?? []).map(row => {
-        const ex = row.exercises ? enrichExercise(row.exercises as any) : undefined;
+        const ex = row.exercises ? enrichExercise(row.exercises as Exercise) : undefined;
         return {
           ...row,
           // Provide the ExerciseMode key as `exercise_id` so session page can use it

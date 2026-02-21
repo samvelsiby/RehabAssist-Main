@@ -22,7 +22,7 @@ export default function Login() {
       await login(email, password);
       toast.success("Welcome back!");
       navigate("/dashboard");
-    } catch (err: any) {
+    } catch (err: unknown) {
       toast.error(err.message || "Login failed");
     } finally {
       setLoading(false);

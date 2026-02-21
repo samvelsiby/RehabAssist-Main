@@ -33,7 +33,7 @@ export function useMiniSquatAnalysis({ side, onResultUpdate }: UseMiniSquatAnaly
   }, []);
 
   // Draw skeleton overlay on canvas
-  const drawPoseOverlay = useCallback((landmarks: any[], canvas: HTMLCanvasElement, video: HTMLVideoElement) => {
+  const drawPoseOverlay = useCallback((landmarks: unknown[], canvas: HTMLCanvasElement, video: HTMLVideoElement) => {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
