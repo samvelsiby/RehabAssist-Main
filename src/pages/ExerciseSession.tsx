@@ -204,30 +204,41 @@ export default function ExerciseSession() {
   }, [stopAnalysis, announce, currentSet]);
 
   // ── Set completion detection ────────────────────────────────────────────────
+  const setLoggedRef = useRef(false); // guard against double-fire
+
   useEffect(() => {
     if (!isAnalyzing || isResting || !rules) return;
-    if (repsInSet >= targetReps) {
-      // Log the completed set
-      if (assignmentId) {
-        logSession.mutate({
-          assigned_exercise_id: assignmentId,
-          set_number: currentSet,
-          total_reps: repsInSet,
-          correct_reps: currentResult?.correct ? repsInSet : 0,
-          incorrect_reps: currentResult?.incorrect ?? 0,
-          average_form_score: 85,
-        }, {
-          onSuccess: () => toast.success(`Set ${currentSet} logged!`),
-          onError: e => toast.error('Save failed: ' + e.message),
-        });
-      }
-      if (currentSet >= targetSets) {
-        stopAnalysis();
-        announce('All sets complete! Excellent work!');
-      } else {
-        setSetBaseCorrect(currentResult?.correct ?? 0);
-        startRest(rules.restBetweenSets);
-      }
+    if (repsInSet < targetReps) { setLoggedRef.current = false; return; }
+    if (setLoggedRef.current) return; // already logged this set
+    setLoggedRef.current = true;
+
+    stopAnalysis(); // stop immediately to freeze rep counts
+
+    // Accurate rep counts for this set only
+    const correctInSet = Math.min(repsInSet, currentResult?.correct ?? repsInSet);
+    const incorrectInSet = Math.max(0, (currentResult?.incorrect ?? 0));
+    const totalInSet = correctInSet + incorrectInSet;
+    const formScore = totalInSet > 0 ? Math.round((correctInSet / totalInSet) * 100) : 100;
+
+    if (assignmentId) {
+      logSession.mutate({
+        assigned_exercise_id: assignmentId,
+        set_number: currentSet,
+        total_reps: totalInSet,
+        correct_reps: correctInSet,
+        incorrect_reps: incorrectInSet,
+        average_form_score: formScore,
+      }, {
+        onSuccess: () => toast.success(`Set ${currentSet} saved — ${correctInSet} correct, ${incorrectInSet} incorrect`),
+        onError: e => toast.error('Save failed: ' + e.message),
+      });
+    }
+
+    if (currentSet >= targetSets) {
+      announce('All sets complete! Excellent work!');
+    } else {
+      setSetBaseCorrect(currentResult?.correct ?? 0);
+      startRest(rules.restBetweenSets);
     }
   }, [repsInSet, targetReps]); // eslint-disable-line react-hooks/exhaustive-deps
 
