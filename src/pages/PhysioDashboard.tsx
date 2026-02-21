@@ -21,6 +21,7 @@ import {
 import { toast } from "@/components/ui/sonner";
 import { useConsultationCode, useLinkedClients } from "@/hooks/usePhysioLink";
 import { useExerciseLibrary, useAssignExercise, useAssignedExercises } from "@/hooks/useExercises";
+import { useCustomExerciseConfigs } from "@/hooks/useCustomExerciseConfigs";
 import { useClientAdherence, type ClientAdherence } from "@/hooks/useClientAdherence";
 import {
   Dialog,
@@ -42,6 +43,7 @@ export default function PhysioDashboard() {
   const { data: consultCode } = useConsultationCode();
   const { data: clients = [], isLoading: clientsLoading } = useLinkedClients();
   const { data: exerciseLibrary = [] } = useExerciseLibrary();
+  const { data: customConfigs = [] } = useCustomExerciseConfigs();
 
   const clientIds = clients.map((c) => c.id);
   const { data: adherenceData = [] } = useClientAdherence(clientIds);
@@ -229,7 +231,17 @@ export default function PhysioDashboard() {
 
         {/* Exercise Library */}
         <div className="glass rounded-xl p-6">
-          <h2 className="font-display text-lg font-semibold mb-5">Exercise Library</h2>
+          <div className="flex items-center justify-between mb-5">
+            <h2 className="font-display text-lg font-semibold">Exercise Library</h2>
+            <Button
+              variant="outline"
+              onClick={() => navigate('/exercise-designer')}
+              className="bg-primary/10 border-primary/20 text-primary hover:bg-primary/20"
+            >
+              <Plus className="h-4 w-4 mr-1" />
+              Design Exercise
+            </Button>
+          </div>
           <div className="grid sm:grid-cols-2 gap-3">
             {exerciseLibrary.map((ex) => (
               <div key={ex.id} className="p-4 rounded-xl bg-secondary/30">
@@ -243,6 +255,69 @@ export default function PhysioDashboard() {
               </div>
             ))}
           </div>
+        </div>
+
+        {/* Custom Exercise Configurations */}
+        <div className="glass rounded-xl p-6">
+          <div className="flex items-center justify-between mb-5">
+            <h2 className="font-display text-lg font-semibold">Custom Exercise Configurations</h2>
+            <Button
+              variant="outline"
+              onClick={() => navigate('/exercise-designer')}
+              className="bg-primary/10 border-primary/20 text-primary hover:bg-primary/20"
+            >
+              <Plus className="h-4 w-4 mr-1" />
+              Create Configuration
+            </Button>
+          </div>
+          
+          {customConfigs.length > 0 ? (
+            <div className="grid gap-3">
+              {customConfigs.map((config) => (
+                <div key={config.id} className="p-4 rounded-xl bg-secondary/30 border border-border/50">
+                  <div className="flex items-center justify-between mb-2">
+                    <div>
+                      <p className="font-medium text-sm">{config.name}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {config.exercise_type} • {config.difficulty}
+                      </p>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => navigate(`/exercise-designer?type=${config.exercise_type}`)}
+                      >
+                        Edit
+                      </Button>
+                    </div>
+                  </div>
+                  {config.description && (
+                    <p className="text-xs text-muted-foreground mt-2">{config.description}</p>
+                  )}
+                  {config.adaptations && config.adaptations.length > 0 && (
+                    <div className="mt-2">
+                      <p className="text-xs font-medium text-muted-foreground mb-1">Adaptations:</p>
+                      <div className="flex flex-wrap gap-1">
+                        {config.adaptations.map((adaptation, i) => (
+                          <span key={i} className="text-xs px-2 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/20">
+                            {adaptation}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-center py-8">
+              <Dumbbell className="h-12 w-12 text-muted-foreground mx-auto mb-3" />
+              <p className="text-sm text-muted-foreground">
+                No custom configurations yet. Create your first one using the Exercise Designer.
+              </p>
+            </div>
+          )}
         </div>
 
         {/* Assign exercise dialog */}

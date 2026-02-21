@@ -30,7 +30,10 @@ export function useVoiceAssistant(enabled: boolean = true) {
 
     // ── Core flush — only ONE item spoken at a time ──────────────────────────
     const flushQueue = useCallback(() => {
-        if (!('speechSynthesis' in window)) return;
+        if (!('speechSynthesis' in window)) {
+            console.warn('[Voice] speechSynthesis not available');
+            return;
+        }
         if (isSpeakingRef.current || queueRef.current.length === 0) return;
 
         const next = queueRef.current.shift()!;
@@ -74,12 +77,20 @@ export function useVoiceAssistant(enabled: boolean = true) {
 
         // KEY FIX: Chrome pauses speechSynthesis when getUserMedia stream is active.
         // Must call resume() before every speak() or the utterance queues but never starts.
-        if (speechSynthesis.paused) {
-            console.log('[Voice] was paused — resuming');
-            speechSynthesis.resume();
+        try {
+            if (speechSynthesis.paused) {
+                console.log('[Voice] was paused — resuming');
+                speechSynthesis.resume();
+            }
+            // Wait a bit for resume to take effect
+            setTimeout(() => {
+                speechSynthesis.speak(utter);
+                console.log('[Voice] spoke:', utter.text, '| paused:', speechSynthesis.paused, '| speaking:', speechSynthesis.speaking, '| pending:', speechSynthesis.pending);
+            }, 50);
+        } catch (e) {
+            console.error('[Voice] speak error:', e);
+            done();
         }
-        speechSynthesis.speak(utter);
-        console.log('[Voice] spoke:', utter.text, '| paused:', speechSynthesis.paused, '| speaking:', speechSynthesis.speaking, '| pending:', speechSynthesis.pending);
     }, []);
 
     // Keep-alive: Chrome pauses synthesis after tab media activity.
@@ -96,7 +107,11 @@ export function useVoiceAssistant(enabled: boolean = true) {
 
     // ── Enqueue ───────────────────────────────────────────────────────────────
     const enqueue = useCallback((text: string, priority = false) => {
-        if (!enabled || !('speechSynthesis' in window) || !text.trim()) return;
+        if (!enabled || !('speechSynthesis' in window) || !text.trim()) {
+            console.warn('[Voice] enqueue blocked:', { enabled, hasSpeech: 'speechSynthesis' in window, text });
+            return;
+        }
+        console.log('[Voice] enqueuing:', text, 'priority:', priority);
 
         if (priority) {
             // Cancel, then wait for Chrome to finish processing before speaking
@@ -120,13 +135,27 @@ export function useVoiceAssistant(enabled: boolean = true) {
 
     // ── Public API ────────────────────────────────────────────────────────────
 
-    const announce = useCallback((text: string) => enqueue(text, true), [enqueue]);
+    const announce = useCallback((text: string) => {
+        console.log('[Voice] announce called:', text);
+        // Test direct speech synthesis
+        if ('speechSynthesis' in window && enabled) {
+            try {
+                const testUtter = new SpeechSynthesisUtterance(text);
+                if (speechSynthesis.paused) speechSynthesis.resume();
+                speechSynthesis.speak(testUtter);
+                console.log('[Voice] direct speak attempted');
+            } catch (e) {
+                console.error('[Voice] direct speak failed:', e);
+            }
+        }
+        enqueue(text, true);
+    }, [enqueue, enabled]);
 
     const announceFeedback = useCallback((messages: string[]) => {
         if (!enabled || !messages.length) return;
         const msg = messages[0];
         if (msg === lastFeedbackRef.current) return;
-        if (['Good form!', 'Waiting for pose…', 'No pose detected'].includes(msg)) return;
+        if (['Waiting for pose…', 'No pose detected'].includes(msg)) return;
         lastFeedbackRef.current = msg;
         enqueue(msg);
     }, [enabled, enqueue]);

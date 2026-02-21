@@ -13,9 +13,71 @@ import { useVoiceAssistant } from '@/hooks/useVoiceAssistant';
 import { useGeminiCoach } from '@/hooks/useGeminiCoach';
 import type { Side } from '@/services/exercises/mini-squat-analyzer';
 import { toast } from '@/components/ui/sonner';
-import type { AnalyzerResult } from '@/utils/exercise-geometry';
+import type { AnalyzerResult, Point } from '@/utils/exercise-geometry';
 
 // ─── Demo canvas animation (stick figure) ────────────────────────────────────
+function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * t;
+}
+
+function clamp(v: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, v));
+}
+
+function smoothstep(t: number): number {
+  const x = clamp(t, 0, 1);
+  return x * x * (3 - 2 * x);
+}
+
+function squatPhase(timeSec: number): number {
+  const cycle = 2.8;
+  const u = (timeSec % cycle) / cycle;
+  if (u < 0.15) return 0;
+  if (u < 0.55) {
+    const t = (u - 0.15) / (0.55 - 0.15);
+    return smoothstep(t);
+  }
+  if (u < 0.7) return 1;
+  const t = (u - 0.7) / (1.0 - 0.7);
+  return 1 - smoothstep(t);
+}
+
+function drawSegment(ctx: CanvasRenderingContext2D, p1: Point, p2: Point): void {
+  ctx.beginPath();
+  ctx.moveTo(p1.x, p1.y);
+  ctx.lineTo(p2.x, p2.y);
+  ctx.stroke();
+}
+
+function drawJoint(ctx: CanvasRenderingContext2D, point: Point, r = 4): void {
+  ctx.beginPath();
+  ctx.arc(point.x, point.y, r, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawTextPill(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  bg: string,
+  fg: string
+) {
+  ctx.font = "13px ui-monospace, Menlo, Consolas, monospace";
+  const padX = 10;
+  const padY = 6;
+  const w = ctx.measureText(text).width + padX * 2;
+  const h = 20 + padY;
+
+  ctx.fillStyle = bg;
+  ctx.beginPath();
+  ctx.roundRect(x, y - 16, w, h, 10);
+  ctx.fill();
+
+  ctx.fillStyle = fg;
+  ctx.fillText(text, x + padX, y);
+}
+
 function buildJoints(mode: ExerciseMode, t: number) {
   const ease = (x: number) => x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2;
   const e = ease(t);
@@ -32,8 +94,16 @@ function buildJoints(mode: ExerciseMode, t: number) {
     lHeel: { x: cx - 2, y: 183 }, rHeel: { x: cx + 2, y: 183 },
   };
   if (mode === 'squat') {
-    const d = e * 28; j.lHip = { x: cx - 14 + e * 3, y: 100 + d }; j.rHip = { x: cx + 14 - e * 3, y: 100 + d };
-    j.lKnee = { x: cx - 20 - e * 6, y: 142 + d * 0.55 }; j.rKnee = { x: cx + 20 + e * 6, y: 142 + d * 0.55 };
+    const w = 320, h = 200;
+    j.lAnkle = { x: w * 0.56, y: h - 26 };
+    j.rAnkle = { x: w * 0.56, y: h - 26 };
+    j.lKnee = { x: lerp(w * 0.53, w * 0.5, e), y: h - 74 };
+    j.rKnee = { x: lerp(w * 0.53, w * 0.5, e), y: h - 74 };
+    j.lHip = { x: lerp(w * 0.5, w * 0.44, e), y: lerp(h - 122, h - 88, e) };
+    j.rHip = { x: lerp(w * 0.5, w * 0.44, e), y: lerp(h - 122, h - 88, e) };
+    j.lSh = { x: lerp(w * 0.49, w * 0.41, e), y: j.lHip.y - 58 };
+    j.rSh = { x: lerp(w * 0.49, w * 0.41, e), y: j.rHip.y - 58 };
+    j.head = { x: j.lSh.x, y: j.lSh.y - 22 };
   } else if (mode === 'hamstring_curl') {
     const ang = e * 85 * Math.PI / 180; const sl = 42;
     j.rAnkle = { x: cx + 14 + Math.sin(ang) * sl * 0.8, y: 142 + Math.cos(ang) * sl };
@@ -51,28 +121,196 @@ function buildJoints(mode: ExerciseMode, t: number) {
 
 function drawDemo(ctx: CanvasRenderingContext2D, mode: ExerciseMode, progress: number) {
   const W = ctx.canvas.width, H = ctx.canvas.height;
-  ctx.clearRect(0, 0, W, H);
-  ctx.fillStyle = '#0d0d1f'; ctx.fillRect(0, 0, W, H);
-  ctx.strokeStyle = '#1e1e3f'; ctx.lineWidth = 1.5;
-  ctx.beginPath(); ctx.moveTo(10, H - 12); ctx.lineTo(W - 10, H - 12); ctx.stroke();
-  const PING = progress < 0.5 ? progress * 2 : 2 - progress * 2;
-  const j = buildJoints(mode, PING);
-  const CONNS: [string, string][] = [
-    ['lSh', 'rSh'], ['lSh', 'lHip'], ['rSh', 'rHip'], ['lHip', 'rHip'],
-    ['lSh', 'lElb'], ['lElb', 'lWri'], ['rSh', 'rElb'], ['rElb', 'rWri'],
-    ['head', 'lSh'], ['head', 'rSh'],
-    ['lHip', 'lKnee'], ['lKnee', 'lAnkle'], ['lAnkle', 'lToe'], ['lAnkle', 'lHeel'],
-    ['rHip', 'rKnee'], ['rKnee', 'rAnkle'], ['rAnkle', 'rToe'], ['rAnkle', 'rHeel'],
-  ];
-  ctx.strokeStyle = '#22c55e'; ctx.lineWidth = 2.2;
-  CONNS.forEach(([a, b]) => { if (!j[a] || !j[b]) return; ctx.beginPath(); ctx.moveTo(j[a].x, j[a].y); ctx.lineTo(j[b].x, j[b].y); ctx.stroke(); });
-  ctx.beginPath(); ctx.arc(j.head.x, j.head.y, 10, 0, Math.PI * 2); ctx.fillStyle = '#22c55e'; ctx.fill();
-  ['lHip', 'rHip', 'lKnee', 'rKnee', 'lAnkle', 'rAnkle'].forEach(k => {
-    if (!j[k]) return; ctx.beginPath(); ctx.arc(j[k].x, j[k].y, 4.5, 0, Math.PI * 2); ctx.fillStyle = '#fbbf24'; ctx.fill();
-  });
-  const labels: Record<ExerciseMode, string> = { squat: 'Good Squat', hamstring_curl: 'Good Curl', heel_raise: 'Good Raise' };
-  ctx.fillStyle = '#4ade80'; ctx.font = '600 11px Inter,sans-serif'; ctx.textAlign = 'center';
-  ctx.fillText(labels[mode], W / 2, 13); ctx.textAlign = 'left';
+  
+  if (mode === 'squat') {
+    drawSquatDemo(ctx, W, H, progress);
+  } else {
+    const PING = progress < 0.5 ? progress * 2 : 2 - progress * 2;
+    const j = buildJoints(mode, PING);
+    
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = '#0d0d1f'; ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = '#1e1e3f'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(10, H - 12); ctx.lineTo(W - 10, H - 12); ctx.stroke();
+    
+    const CONNS: [string, string][] = [
+      ['lSh', 'rSh'], ['lSh', 'lHip'], ['rSh', 'rHip'], ['lHip', 'rHip'],
+      ['lSh', 'lElb'], ['lElb', 'lWri'], ['rSh', 'rElb'], ['rElb', 'rWri'],
+      ['head', 'lSh'], ['head', 'rSh'],
+      ['lHip', 'lKnee'], ['lKnee', 'lAnkle'], ['lAnkle', 'lToe'], ['lAnkle', 'lHeel'],
+      ['rHip', 'rKnee'], ['rKnee', 'rAnkle'], ['rAnkle', 'rToe'], ['rAnkle', 'rHeel'],
+    ];
+    ctx.strokeStyle = '#22c55e'; ctx.lineWidth = 2.2;
+    CONNS.forEach(([a, b]) => { if (!j[a] || !j[b]) return; ctx.beginPath(); ctx.moveTo(j[a].x, j[a].y); ctx.lineTo(j[b].x, j[b].y); ctx.stroke(); });
+    ctx.beginPath(); ctx.arc(j.head.x, j.head.y, 10, 0, Math.PI * 2); ctx.fillStyle = '#22c55e'; ctx.fill();
+    ['lHip', 'rHip', 'lKnee', 'rKnee', 'lAnkle', 'rAnkle'].forEach(k => {
+      if (!j[k]) return; ctx.beginPath(); ctx.arc(j[k].x, j[k].y, 4.5, 0, Math.PI * 2); ctx.fillStyle = '#fbbf24'; ctx.fill();
+    });
+    
+    const labels: Record<ExerciseMode, string> = { squat: 'Good Squat', hamstring_curl: 'Good Curl', heel_raise: 'Good Raise' };
+    ctx.fillStyle = '#4ade80'; ctx.font = '600 11px Inter,sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(labels[mode], W / 2, 13); ctx.textAlign = 'left';
+  }
+}
+
+function drawSquatDemo(ctx: CanvasRenderingContext2D, w: number, h: number, progress: number): void {
+  // Background
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "#0b1324";
+  ctx.fillRect(0, 0, w, h);
+
+  // Ground line
+  ctx.strokeStyle = "#334155";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(18, h - 26);
+  ctx.lineTo(w - 18, h - 26);
+  ctx.stroke();
+
+
+  const timeSec = progress * 2.8; // Convert progress to time for squatPhase
+  const phase = squatPhase(timeSec);
+
+  // Draw good rep
+  drawStickSquat(ctx, { w, h, phase, style: "good", alpha: 1 });
+  
+  // Draw cues
+  drawSquatCues(ctx, w, h, phase);
+}
+
+function drawStickSquat(ctx: CanvasRenderingContext2D, opts: {
+  w: number;
+  h: number;
+  phase: number;
+  style: "good" | "bad";
+  alpha: number;
+}) {
+  const { w, h, phase, style, alpha } = opts;
+  
+  // Style setup
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  const color = style === "good" ? "#e5e7eb" : "#fb7185";
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = 3;
+
+  const groundY = h - 26;
+
+  // Foot
+  const toe: Point = { x: w * 0.60, y: groundY };
+  const heel: Point = {
+    x: w * 0.54,
+    y: style === "bad" ? lerp(groundY, groundY - 16, smoothstep(phase)) : groundY,
+  };
+  const ankle: Point = { x: w * 0.56, y: groundY - 2 };
+
+  // Knee
+  const kneeX = style === "bad"
+    ? lerp(w * 0.55, w * 0.67, smoothstep(phase))
+    : lerp(w * 0.55, w * 0.61, smoothstep(phase));
+  const knee: Point = { x: kneeX, y: lerp(groundY - 76, groundY - 66, smoothstep(phase)) };
+
+  // Hip
+  const hip: Point = style === "bad"
+    ? {
+        x: lerp(w * 0.52, w * 0.56, smoothstep(phase)),
+        y: lerp(groundY - 132, groundY - 92, smoothstep(phase)),
+      }
+    : {
+        x: lerp(w * 0.52, w * 0.46, smoothstep(phase)),
+        y: lerp(groundY - 132, groundY - 88, smoothstep(phase)),
+      };
+
+  // Shoulder
+  const shoulder: Point = style === "bad"
+    ? {
+        x: lerp(hip.x - 10, hip.x + 36, smoothstep(phase)),
+        y: hip.y - lerp(64, 56, smoothstep(phase)),
+      }
+    : {
+        x: lerp(hip.x - 6, hip.x + 10, smoothstep(phase)),
+        y: hip.y - 62,
+      };
+
+  const head: Point = { x: shoulder.x, y: shoulder.y - 22 };
+
+  // Arm
+  const elbow: Point = style === "bad"
+    ? { x: shoulder.x + 36, y: shoulder.y + 18 }
+    : { x: shoulder.x + 24, y: shoulder.y + 18 };
+  const hand: Point = style === "bad"
+    ? { x: elbow.x + 30, y: elbow.y + 18 }
+    : { x: elbow.x + 22, y: elbow.y + 16 };
+
+  // Draw segments
+  drawSegment(ctx, heel, toe);
+  drawSegment(ctx, ankle, knee);
+  drawSegment(ctx, knee, hip);
+  drawSegment(ctx, hip, shoulder);
+  drawSegment(ctx, shoulder, head);
+  drawSegment(ctx, shoulder, elbow);
+  drawSegment(ctx, elbow, hand);
+
+  // Joints
+  drawJoint(ctx, head, 4);
+  drawJoint(ctx, shoulder, 4);
+  drawJoint(ctx, hip, 4);
+  drawJoint(ctx, knee, 4);
+  drawJoint(ctx, ankle, 4);
+
+  // Guides (good only)
+  if (style === "good") {
+    ctx.globalAlpha = alpha * 0.25;
+    ctx.strokeStyle = "#93c5fd";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(hip.x, hip.y - 110);
+    ctx.lineTo(hip.x, groundY);
+    ctx.stroke();
+
+    ctx.strokeStyle = "#a7f3d0";
+    ctx.beginPath();
+    ctx.moveTo(toe.x, groundY);
+    ctx.lineTo(toe.x, groundY - 120);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+function drawSquatCues(ctx: CanvasRenderingContext2D, w: number, h: number, phase: number) {
+  const bottom = phase > 0.7;
+  const mid = phase > 0.25 && phase <= 0.7;
+
+  drawTextPill(
+    ctx,
+    "Heels down",
+    16,
+    50,
+    bottom || mid ? "#0f172a" : "#0b1324",
+    "#e5e7eb"
+  );
+  drawTextPill(
+    ctx,
+    "Knees track over toes",
+    16,
+    80,
+    bottom || mid ? "#0f172a" : "#0b1324",
+    "#e5e7eb"
+  );
+  drawTextPill(
+    ctx,
+    "Neutral spine",
+    16,
+    110,
+    mid || bottom ? "#0f172a" : "#0b1324",
+    "#e5e7eb"
+  );
+
+  if (bottom) {
+    drawTextPill(ctx, "Pause at depth", 16, 140, "#0f172a", "#e5e7eb");
+  }
 }
 
 // ─── Exercise pick screen (no assignment) ────────────────────────────────────
@@ -163,7 +401,7 @@ export default function ExerciseSession() {
   const formIssueCountRef = useRef(0);
 
   // ── Exercise hook ──────────────────────────────────────────────────────────
-  const { initialize, startAnalysis, stopAnalysis, resetAnalysis, isInitialized, isAnalyzing, error: analysisError } =
+  const { initialize, startAnalysis, stopAnalysis, pauseAnalysis, resumeAnalysis, resetAnalysis, isInitialized, isAnalyzing, isPaused, error: analysisError } =
     useExerciseSession({
       exerciseMode: exerciseMode ?? 'squat',
       side,
@@ -330,6 +568,7 @@ export default function ExerciseSession() {
       });
 
       // Generate per-set summary in parallel with rest timer
+      console.log('[Gemini] API_KEY exists:', !!API_KEY);
       if (API_KEY) {
         generateSetSummary({
           setNumber: currentSet, totalSets: targetSets,
@@ -675,6 +914,20 @@ export default function ExerciseSession() {
                     </div>
                   )}
                 </div>
+                
+                {/* Rep counter right below video */}
+                <div className="p-4 border-t border-border/50 bg-secondary/10">
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="text-sm font-medium text-muted-foreground">Reps this set</span>
+                    <span className="font-display text-3xl font-bold text-primary">{repsInSet} <span className="text-lg text-muted-foreground">/ {targetReps}</span></span>
+                  </div>
+                  <div className="w-full h-3 bg-secondary rounded-full overflow-hidden">
+                    <div className="h-full bg-primary rounded-full transition-all duration-300" style={{ width: `${Math.min(100, (repsInSet / targetReps) * 100)}%` }} />
+                  </div>
+                  {repsInSet >= targetReps && (
+                    <p className="text-center text-xs text-green-400 font-medium mt-2">Set Complete! 🎉</p>
+                  )}
+                </div>
               </article>
 
               {/* ── Panel ───────────────────────────────── */}
@@ -696,16 +949,6 @@ export default function ExerciseSession() {
                   <span className="text-xs text-primary font-medium">{statusText}</span>
                 </div>
 
-                {/* Rep progress */}
-                <div className="p-3 border border-border/50 rounded-xl bg-secondary/20 space-y-2">
-                  <div className="flex justify-between items-baseline">
-                    <span className="text-xs text-muted-foreground">Reps this set</span>
-                    <span className="font-display text-2xl font-bold text-primary">{repsInSet} <span className="text-sm text-muted-foreground">/ {targetReps}</span></span>
-                  </div>
-                  <div className="w-full h-2 bg-secondary rounded-full overflow-hidden">
-                    <div className="h-full bg-primary rounded-full transition-all" style={{ width: `${Math.min(100, (repsInSet / targetReps) * 100)}%` }} />
-                  </div>
-                </div>
 
                 {/* Stats */}
                 <div className="grid grid-cols-3 gap-2">
@@ -730,16 +973,24 @@ export default function ExerciseSession() {
                 {/* Demo animation */}
                 <div className="p-2 border border-border/50 rounded-lg bg-secondary/20">
                   <div className="text-xs text-muted-foreground mb-1">Good Rep Animation</div>
-                  <canvas ref={demoRef} width={296} height={200} className="w-full rounded" />
+                  <canvas ref={demoRef} width={500} height={300} className="w-full rounded" />
                 </div>
 
                 {/* Action buttons */}
                 <div className="space-y-2">
-                  <Button size="lg" className="w-full bg-primary text-primary-foreground" onClick={handleStart} disabled={!cameraOn || !isInitialized || isResting}>
-                    {isAnalyzing ? 'Analyzing…' : isResting ? `Resting… ${restSecondsLeft}s` : 'Start Analysis'}
-                  </Button>
-                  {isAnalyzing && (
-                    <Button size="sm" variant="outline" className="w-full" onClick={stopAnalysis}>Pause</Button>
+                  {!isAnalyzing ? (
+                    <Button size="lg" className="w-full bg-primary text-primary-foreground" onClick={handleStart} disabled={!cameraOn || !isInitialized || isResting}>
+                      {isResting ? `Resting… ${restSecondsLeft}s` : 'Start Analysis'}
+                    </Button>
+                  ) : (
+                    <div className="flex gap-2">
+                      <Button size="lg" className="flex-1" variant="outline" onClick={isPaused ? resumeAnalysis : pauseAnalysis}>
+                        {isPaused ? 'Resume' : 'Pause'}
+                      </Button>
+                      <Button size="lg" className="flex-1" variant="destructive" onClick={stopAnalysis}>
+                        Stop
+                      </Button>
+                    </div>
                   )}
                   <div className="flex gap-2">
                     <Button size="sm" variant="ghost" className="flex-1" onClick={() => { resetAnalysis(); setSetBaseCorrect(currentResult?.correct ?? 0); }}>Reset Set</Button>

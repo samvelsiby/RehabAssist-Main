@@ -37,6 +37,8 @@ export function useLogSession() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["session_logs"] });
       queryClient.invalidateQueries({ queryKey: ["today_session_logs"] });
+      queryClient.invalidateQueries({ queryKey: ["client_adherence"] });
+      queryClient.invalidateQueries({ queryKey: ["assigned_exercises"] });
     },
   });
 }

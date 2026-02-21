@@ -39,7 +39,7 @@ export default function ClientDashboard() {
       await linkMutation.mutateAsync(consultCode);
       toast.success("Linked to physiotherapist!");
       setConsultCode("");
-    } catch (err: any) {
+    } catch (err: unknown) {
       toast.error(err.message || "Failed to link");
     }
   };
@@ -170,11 +170,10 @@ export default function ClientDashboard() {
                   initial={{ opacity: 0, x: -20 }}
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: i * 0.08 }}
-                  className={`flex items-center justify-between p-4 rounded-xl transition-colors ${
-                    ex.completed
+                  className={`flex items-center justify-between p-4 rounded-xl transition-colors ${ex.completed
                       ? "bg-success/5 border border-success/20"
                       : "bg-secondary/30 hover:bg-secondary/50 cursor-pointer"
-                  }`}
+                    }`}
                   onClick={() => !ex.completed && navigate(`/session?assignmentId=${ex.id}`)}
                 >
                   <div className="flex items-center gap-3">

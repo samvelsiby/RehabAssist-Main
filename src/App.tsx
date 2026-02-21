@@ -12,6 +12,7 @@ import ClientDashboard from "./pages/ClientDashboard";
 import ExerciseSession from "./pages/ExerciseSession";
 import Progress from "./pages/Progress";
 import PatientDetail from "./pages/PatientDetail";
+import ExerciseDesignerPage from "./pages/ExerciseDesignerPage";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient({
@@ -58,6 +59,7 @@ const App = () => (
             <Route path="/analytics" element={<ProtectedRoute><Progress /></ProtectedRoute>} />
             <Route path="/patients" element={<ProtectedRoute><PhysioDashboard /></ProtectedRoute>} />
             <Route path="/patients/:clientId" element={<ProtectedRoute><PatientDetail /></ProtectedRoute>} />
+            <Route path="/exercise-designer" element={<ProtectedRoute><ExerciseDesignerPage /></ProtectedRoute>} />
             <Route path="/settings" element={<ProtectedRoute><ClientDashboard /></ProtectedRoute>} />
             <Route path="*" element={<NotFound />} />
           </Routes>

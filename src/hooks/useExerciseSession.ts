@@ -49,11 +49,13 @@ interface Props {
 export function useExerciseSession({ exerciseMode, side, onResultUpdate }: Props) {
   const [isInitialized, setIsInitialized] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Refs that never become stale inside the animation loop
   const isInitializedRef = useRef(false);
   const isAnalyzingRef = useRef(false);
+  const isPausedRef = useRef(false);
   const analyzerRef = useRef<IAnalyzer>(makeAnalyzer(exerciseMode));
   const sideRef = useRef<Side>(side);
   const onResultRef = useRef(onResultUpdate);
@@ -136,7 +138,12 @@ export function useExerciseSession({ exerciseMode, side, onResultUpdate }: Props
 
   // ── Analysis loop ────────────────────────────────────────────────────────
   const loop = useCallback(async () => {
-    if (!isAnalyzingRef.current || !videoRef.current || !canvasRef.current) return;
+    if (!isAnalyzingRef.current || !videoRef.current || !canvasRef.current || isPausedRef.current) {
+      if (isAnalyzingRef.current && !isPausedRef.current) {
+        rafRef.current = requestAnimationFrame(loop);
+      }
+      return;
+    }
 
     const now = performance.now();
     // Throttle to ~10 fps
@@ -198,12 +205,27 @@ export function useExerciseSession({ exerciseMode, side, onResultUpdate }: Props
 
   const stopAnalysis = useCallback(() => {
     isAnalyzingRef.current = false;
+    isPausedRef.current = false;
     setIsAnalyzing(false);
+    setIsPaused(false);
     if (rafRef.current) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
     }
   }, []);
+
+  const pauseAnalysis = useCallback(() => {
+    isPausedRef.current = true;
+    setIsPaused(true);
+  }, []);
+
+  const resumeAnalysis = useCallback(() => {
+    if (isAnalyzingRef.current) {
+      isPausedRef.current = false;
+      setIsPaused(false);
+      requestAnimationFrame(loop);
+    }
+  }, [loop]);
 
   const resetAnalysis = useCallback(() => {
     analyzerRef.current.reset();
@@ -223,9 +245,12 @@ export function useExerciseSession({ exerciseMode, side, onResultUpdate }: Props
     initialize,
     startAnalysis,
     stopAnalysis,
+    pauseAnalysis,
+    resumeAnalysis,
     resetAnalysis,
     isInitialized,
     isAnalyzing,
+    isPaused,
     error,
   };
 }
