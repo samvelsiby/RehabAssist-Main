@@ -1,136 +1,124 @@
 /**
- * useVoiceAssistant
- * Robust browser TTS hook that works around Chrome's many speechSynthesis quirks:
- *
- *  1. getVoices() is async — loaded via voiceschanged event
- *  2. Chrome silently kills utterances after ~15s — watchdog timer resets the queue
- *  3. isSpeaking can get stuck — error handler + watchdog always unblock it
- *  4. Chrome requires a prior user gesture — safe to call after any click
+ * useVoiceAssistant — robust browser TTS
+ * Key rules that make it work in Chrome:
+ *  1. NEVER call cancel() before a normal speak() — it races and kills the utterance
+ *  2. Set isSpeakingRef = true BEFORE the setTimeout, not in onstart, so no re-entry
+ *  3. Voices are loaded via voiceschanged event (getVoices() is empty on first call)
+ *  4. Watchdog resets stuck state if Chrome kills the utterance silently (15s bug)
  */
 import { useCallback, useRef, useEffect } from 'react';
 
 export function useVoiceAssistant(enabled: boolean = true) {
-    // ── Voice loading ──────────────────────────────────────────────────────────
     const voicesRef = useRef<SpeechSynthesisVoice[]>([]);
     const isSpeakingRef = useRef(false);
     const queueRef = useRef<Array<{ text: string; priority: boolean }>>([]);
     const watchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const lastFeedbackRef = useRef('');
+    const lastCorrectRef = useRef(-1);
 
-    // Tracking for rep/feedback dedup
-    const lastFeedbackRef = useRef<string>('');
-    const lastCorrectRef = useRef<number>(-1);
-
-    // Load voices as soon as they are available
+    // Load voices asynchronously (Chrome always returns [] on first call)
     useEffect(() => {
         if (!('speechSynthesis' in window)) return;
-
-        const loadVoices = () => {
+        const load = () => {
             const v = speechSynthesis.getVoices();
             if (v.length > 0) voicesRef.current = v;
         };
-
-        loadVoices();
-        speechSynthesis.addEventListener('voiceschanged', loadVoices);
-        return () => speechSynthesis.removeEventListener('voiceschanged', loadVoices);
+        load();
+        speechSynthesis.addEventListener('voiceschanged', load);
+        return () => speechSynthesis.removeEventListener('voiceschanged', load);
     }, []);
 
-    // ── Queue flush ────────────────────────────────────────────────────────────
+    // ── Core flush — only ONE item spoken at a time ──────────────────────────
     const flushQueue = useCallback(() => {
         if (!('speechSynthesis' in window)) return;
         if (isSpeakingRef.current || queueRef.current.length === 0) return;
 
         const next = queueRef.current.shift()!;
+
+        // Mark as speaking IMMEDIATELY (before any async ops) to block re-entry
+        isSpeakingRef.current = true;
+
         const utter = new SpeechSynthesisUtterance(next.text);
         utter.rate = 1.0;
         utter.pitch = 1.0;
         utter.volume = 1.0;
 
-        // Best available English voice
-        const voices = voicesRef.current.length > 0 ? voicesRef.current : speechSynthesis.getVoices();
-        const preferred =
-            voices.find(v => v.lang.startsWith('en') && (v.name.includes('Samantha') || v.name.includes('Google UK') || v.name.includes('Natural') || v.name.includes('Neural'))) ??
+        // Select best available English voice
+        const voices = voicesRef.current.length ? voicesRef.current : speechSynthesis.getVoices();
+        const voice =
+            voices.find(v => v.lang.startsWith('en') && /Samantha|Google UK|Neural|Natural|Karen|Moira/.test(v.name)) ??
             voices.find(v => v.lang === 'en-US') ??
             voices.find(v => v.lang.startsWith('en'));
-        if (preferred) utter.voice = preferred;
+        if (voice) utter.voice = voice;
 
-        const clear = () => {
+        const done = () => {
             isSpeakingRef.current = false;
             if (watchdogRef.current) { clearTimeout(watchdogRef.current); watchdogRef.current = null; }
         };
 
-        utter.onstart = () => {
-            isSpeakingRef.current = true;
-            // Watchdog: Chrome sometimes never fires onend — reset after 12s
-            watchdogRef.current = setTimeout(() => {
-                console.warn('[VoiceAssistant] watchdog fired — resetting queue');
-                isSpeakingRef.current = false;
-                watchdogRef.current = null;
-                flushQueue();
-            }, 12_000);
-        };
-
-        utter.onend = () => {
-            clear();
-            setTimeout(flushQueue, 80);
-        };
-
+        utter.onend = () => { done(); setTimeout(flushQueue, 60); };
         utter.onerror = (e) => {
             if (e.error !== 'interrupted' && e.error !== 'canceled') {
-                console.warn('[VoiceAssistant] utterance error:', e.error);
+                console.warn('[Voice] error:', e.error);
             }
-            clear();
-            setTimeout(flushQueue, 80);
+            done();
+            setTimeout(flushQueue, 60);
         };
 
-        // Chrome bug: cancel any pending speech first or it may queue internally
-        speechSynthesis.cancel();
-        // Small delay after cancel so Chrome is ready
-        setTimeout(() => speechSynthesis.speak(utter), 50);
+        // Watchdog: Chrome sometimes kills utterances without firing onend
+        watchdogRef.current = setTimeout(() => {
+            console.warn('[Voice] watchdog fired');
+            done();
+            flushQueue();
+        }, 10_000);
+
+        // ⚡ DO NOT call speechSynthesis.cancel() here — it kills the utterance
+        speechSynthesis.speak(utter);
     }, []);
 
-    // ── Enqueue ────────────────────────────────────────────────────────────────
+    // ── Enqueue ───────────────────────────────────────────────────────────────
     const enqueue = useCallback((text: string, priority = false) => {
         if (!enabled || !('speechSynthesis' in window) || !text.trim()) return;
 
         if (priority) {
+            // Priority: cancel everything and speak this NOW
             speechSynthesis.cancel();
             if (watchdogRef.current) { clearTimeout(watchdogRef.current); watchdogRef.current = null; }
             isSpeakingRef.current = false;
-            queueRef.current = [{ text, priority }];
+            queueRef.current = [];
+            // Wait 100ms for cancel to settle before speaking
+            setTimeout(() => {
+                queueRef.current = [{ text, priority }];
+                flushQueue();
+            }, 100);
         } else {
+            // Normal: deduplicate and cap queue
             const last = queueRef.current[queueRef.current.length - 1];
-            if (last?.text === text) return; // no duplicate back-to-back
+            if (last?.text === text) return;
             queueRef.current.push({ text, priority });
-            // Cap queue to avoid a massive backlog
-            if (queueRef.current.length > 4) queueRef.current.splice(0, queueRef.current.length - 4);
+            if (queueRef.current.length > 3) queueRef.current.shift(); // drop oldest
+            flushQueue();
         }
-        flushQueue();
     }, [enabled, flushQueue]);
 
-    // ── Public API ─────────────────────────────────────────────────────────────
+    // ── Public API ────────────────────────────────────────────────────────────
 
-    /** Priority one-shot (clears queue and speaks immediately) */
-    const announce = useCallback((text: string) => {
-        enqueue(text, true);
-    }, [enqueue]);
+    const announce = useCallback((text: string) => enqueue(text, true), [enqueue]);
 
-    /** Speaks real-time feedback — only when message changes, suppresses noise */
     const announceFeedback = useCallback((messages: string[]) => {
         if (!enabled || !messages.length) return;
         const msg = messages[0];
         if (msg === lastFeedbackRef.current) return;
-        if (msg === 'Good form!' || msg === 'Waiting for pose…' || msg === 'No pose detected') return;
+        if (['Good form!', 'Waiting for pose…', 'No pose detected'].includes(msg)) return;
         lastFeedbackRef.current = msg;
         enqueue(msg);
     }, [enabled, enqueue]);
 
-    /** Speaks rep count at milestones (1st rep, every 5, set complete) */
-    const announceRep = useCallback((correct: number, targetReps: number) => {
+    const announceRep = useCallback((correct: number, target: number) => {
         if (!enabled || correct === lastCorrectRef.current) return;
         lastCorrectRef.current = correct;
-        if (correct === 0) return;
-
-        if (correct === targetReps) {
+        if (correct <= 0) return;
+        if (correct === target) {
             enqueue(`${correct} reps! Set done!`, true);
         } else if (correct % 5 === 0) {
             enqueue(`${correct} reps!`);
@@ -146,11 +134,7 @@ export function useVoiceAssistant(enabled: boolean = true) {
         if (watchdogRef.current) { clearTimeout(watchdogRef.current); watchdogRef.current = null; }
     }, []);
 
-    // Reset tracking when disabled/enabled switches
-    useEffect(() => {
-        if (!enabled) cancel();
-    }, [enabled, cancel]);
-
+    useEffect(() => { if (!enabled) cancel(); }, [enabled, cancel]);
     useEffect(() => () => cancel(), [cancel]);
 
     return { announce, announceFeedback, announceRep, cancel };
