@@ -131,7 +131,32 @@ export function useGeminiCoach({ onCoach, enabled = true }: GeminiCoachOptions) 
         );
     }, [generateSpoken]);
 
-    // ── Public: detailed written summary (returns markdown string) ─────────────
+    // ── Public: detailed written per-set summary (returns markdown string) ──────
+    const generateSetSummary = useCallback(async (params: {
+        setNumber: number;
+        totalSets: number;
+        correctReps: number;
+        incorrectReps: number;
+        formScore: number;
+        exerciseName: string;
+        issues: string[];  // unique form issues that appeared during this set
+    }): Promise<string> => {
+        const { setNumber, totalSets, correctReps, incorrectReps, formScore, exerciseName, issues } = params;
+        const totalReps = correctReps + incorrectReps;
+        const issueList = issues.length > 0
+            ? `Form issues detected: ${issues.join(', ')}.`
+            : 'No significant form issues.';
+
+        const prompt =
+            `Exercise: ${exerciseName}. Set ${setNumber} of ${totalSets} just completed.\n` +
+            `Results: ${correctReps} correct reps, ${incorrectReps} incorrect, ${totalReps} total, ${formScore}% form score.\n` +
+            `${issueList}\n` +
+            `Write a brief 2-3 sentence set summary: highlight what went well, flag any form issue with a specific correction, and motivate for the next set (or close positively if this was the last set). Keep it concise and direct.`;
+
+        return generateSummaryText(prompt);
+    }, [generateSummaryText]);
+
+    // ── Public: detailed written session summary (returns markdown string) ─────────────
     const generateSessionSummary = useCallback(async (params: {
         exerciseName: string;
         sets: SetLogEntry[];
@@ -166,6 +191,7 @@ export function useGeminiCoach({ onCoach, enabled = true }: GeminiCoachOptions) 
         coachSetComplete,
         coachFormIssue,
         coachSessionComplete,
+        generateSetSummary,
         generateSessionSummary,
         isEnabled,
         isApiKeyMissing: !API_KEY,

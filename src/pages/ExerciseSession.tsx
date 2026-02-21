@@ -117,9 +117,17 @@ export default function ExerciseSession() {
   const [restSecondsLeft, setRestSecondsLeft] = useState(0);
   const restIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Session summary state
+  // Per-set popup (shown during rest)
+  const [setPopup, setSetPopup] = useState<{
+    setNumber: number; totalSets: number;
+    correct: number; incorrect: number; formScore: number;
+    issues: string[]; summary: string | null; loading: boolean;
+  } | null>(null);
+
+  // Full session summary state (shown after all sets)
   const [sessionSummary, setSessionSummary] = useState<string | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
+
 
   // Accumulated session data for the summary
   const setLogsRef = useRef<Array<{
@@ -144,7 +152,7 @@ export default function ExerciseSession() {
   const { announce, announceFeedback, announceRep, cancel: cancelVoice } = useVoiceAssistant(voiceOn);
   const API_KEY = import.meta.env.VITE_GEMINI_API_KEY as string | undefined;
 
-  const { coachSetComplete, coachSessionComplete, coachFormIssue, generateSessionSummary } =
+  const { coachSetComplete, coachSessionComplete, coachFormIssue, generateSetSummary, generateSessionSummary } =
     useGeminiCoach({
       onCoach: (text) => { if (voiceOn) announce(text); },
       enabled: voiceOn,
@@ -218,6 +226,7 @@ export default function ExerciseSession() {
         if (prev <= 1) {
           clearInterval(restIntervalRef.current!);
           setIsResting(false);
+          setSetPopup(null); // ← dismiss popup when rest ends
           setCurrentSet(s => s + 1);
           announce(`Rest over. Get ready for set ${currentSet + 1}.`);
           return 0;
@@ -301,19 +310,38 @@ export default function ExerciseSession() {
         });
       }
     } else {
-      // Set done — Gemini gives per-set coaching
+      // ── Set done: voice + per-set popup with AI summary ──────────────────
       if (voiceOn) {
         coachSetComplete({
-          setNumber: currentSet,
-          totalSets: targetSets,
-          correctReps: correctInSet,
-          incorrectReps: incorrectInSet,
+          setNumber: currentSet, totalSets: targetSets,
+          correctReps: correctInSet, incorrectReps: incorrectInSet,
           exerciseName: exerciseName ?? 'exercise',
-          formIssues: currentResult?.feedback?.filter(f => f !== 'Good form!' && f !== 'Waiting for pose…') ?? [],
+          formIssues: issuesThisSet,
         });
       } else {
         announce(`Set ${currentSet} complete!`);
       }
+
+      // Show popup immediately in loading state
+      setSetPopup({
+        setNumber: currentSet, totalSets: targetSets,
+        correct: correctInSet, incorrect: incorrectInSet, formScore,
+        issues: issuesThisSet, summary: null, loading: true,
+      });
+
+      // Generate per-set summary in parallel with rest timer
+      if (API_KEY) {
+        generateSetSummary({
+          setNumber: currentSet, totalSets: targetSets,
+          correctReps: correctInSet, incorrectReps: incorrectInSet, formScore,
+          exerciseName: exerciseName ?? 'Exercise', issues: issuesThisSet,
+        }).then(text => {
+          setSetPopup(prev => prev ? { ...prev, summary: text || null, loading: false } : null);
+        });
+      } else {
+        setSetPopup(prev => prev ? { ...prev, loading: false } : null);
+      }
+
       setSetBaseCorrect(currentResult?.correct ?? 0);
       startRest(rules.restBetweenSets);
     }
@@ -523,129 +551,222 @@ export default function ExerciseSession() {
           </div>
 
         ) : (
-          <section className="grid lg:grid-cols-[1.9fr_1fr] gap-4">
-
-            {/* ── Video ───────────────────────────────── */}
-            <article className="glass rounded-xl overflow-hidden">
-              {/* Set progress bar */}
-              <div className="flex">
-                {Array.from({ length: targetSets }).map((_, i) => (
-                  <div key={i} className={`h-1 flex-1 transition-all ${i < currentSet - 1 ? 'bg-green-400' : i === currentSet - 1 ? 'bg-primary' : 'bg-secondary'}`} />
-                ))}
-              </div>
-              <div className="relative aspect-video bg-secondary/30">
-                <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" style={{ display: cameraOn ? 'block' : 'none' }} />
-                <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" style={{ display: cameraOn ? 'block' : 'none', zIndex: 10 }} />
-                {!cameraOn && (
-                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
-                    <Camera className="h-12 w-12 text-muted-foreground" />
-                    <p className="text-sm text-muted-foreground">Camera off</p>
-                    <Button size="sm" className="bg-primary text-primary-foreground" onClick={startCamera}>Enable Camera</Button>
+          <>
+            {/* ── Per-set AI Summary Popup ─────────────────────────────────── */}
+            {setPopup && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+                <div className="glass rounded-2xl p-7 w-full max-w-md shadow-2xl border border-primary/20 animate-in fade-in zoom-in-95 duration-200">
+                  {/* Header */}
+                  <div className="flex items-center justify-between mb-5">
+                    <div>
+                      <h3 className="font-display text-lg font-bold flex items-center gap-2">
+                        <CheckCircle2 className="h-5 w-5 text-green-400" />
+                        Set {setPopup.setNumber} Complete
+                      </h3>
+                      <p className="text-xs text-muted-foreground">
+                        {setPopup.setNumber < setPopup.totalSets
+                          ? `${setPopup.totalSets - setPopup.setNumber} set${setPopup.totalSets - setPopup.setNumber > 1 ? 's' : ''} remaining`
+                          : 'Final set done!'}
+                      </p>
+                    </div>
+                    {/* Rest countdown */}
+                    {isResting && (
+                      <div className="text-center">
+                        <p className="font-display text-3xl font-bold text-primary tabular-nums">{restSecondsLeft}</p>
+                        <p className="text-xs text-muted-foreground">rest</p>
+                      </div>
+                    )}
                   </div>
-                )}
-                {/* Rest overlay */}
-                {isResting && (
-                  <div className="absolute inset-0 bg-black/75 flex flex-col items-center justify-center gap-4 z-20">
-                    <Timer className="h-12 w-12 text-primary animate-pulse" />
-                    <p className="font-display text-5xl font-bold text-primary">{restSecondsLeft}</p>
-                    <p className="text-white text-lg font-medium">Rest — next set starting soon</p>
-                    <Button variant="outline" onClick={() => { clearInterval(restIntervalRef.current!); setIsResting(false); setCurrentSet(s => s + 1); }} className="mt-2 text-white border-white/30">
-                      Skip Rest
+
+                  {/* Stats row */}
+                  <div className="grid grid-cols-3 gap-3 mb-5">
+                    <div className="text-center p-2.5 rounded-lg bg-secondary/30">
+                      <p className="text-xs text-muted-foreground">Correct</p>
+                      <p className="font-display text-xl font-bold text-success">{setPopup.correct}</p>
+                    </div>
+                    <div className="text-center p-2.5 rounded-lg bg-secondary/30">
+                      <p className="text-xs text-muted-foreground">Incorrect</p>
+                      <p className={`font-display text-xl font-bold ${setPopup.incorrect > 0 ? 'text-warning' : 'text-muted-foreground'}`}>
+                        {setPopup.incorrect}
+                      </p>
+                    </div>
+                    <div className="text-center p-2.5 rounded-lg bg-secondary/30">
+                      <p className="text-xs text-muted-foreground">Form Score</p>
+                      <p className={`font-display text-xl font-bold ${setPopup.formScore >= 80 ? 'text-success' : 'text-warning'}`}>
+                        {setPopup.formScore}%
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Form issues */}
+                  {setPopup.issues.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mb-4">
+                      {setPopup.issues.map(issue => (
+                        <span key={issue} className="text-xs px-2 py-0.5 rounded-full bg-warning/10 text-warning border border-warning/20">
+                          ⚠ {issue}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* AI Summary */}
+                  <div className="rounded-lg bg-primary/5 border border-primary/15 p-4 mb-5">
+                    <div className="flex items-center gap-1.5 mb-2">
+                      <Sparkles className="h-3.5 w-3.5 text-primary" />
+                      <span className="text-xs font-semibold text-primary">AI Coach</span>
+                    </div>
+                    {setPopup.loading ? (
+                      <div className="flex items-center gap-2">
+                        <div className="w-3 h-3 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                        <span className="text-xs text-muted-foreground">Analysing your set…</span>
+                      </div>
+                    ) : setPopup.summary ? (
+                      <p className="text-sm text-muted-foreground leading-relaxed">{setPopup.summary}</p>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">Add VITE_GEMINI_API_KEY for AI coaching.</p>
+                    )}
+                  </div>
+
+                  {/* Skip rest button */}
+                  <button
+                    onClick={() => {
+                      clearInterval(restIntervalRef.current!);
+                      setIsResting(false);
+                      setSetPopup(null);
+                      setCurrentSet(s => s + 1);
+                    }}
+                    className="w-full py-2 rounded-lg border border-border/50 text-sm text-muted-foreground hover:bg-secondary/50 transition-colors"
+                  >
+                    Skip Rest — Start Next Set
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <section className="grid lg:grid-cols-[1.9fr_1fr] gap-4">
+
+              {/* ── Video ───────────────────────────────── */}
+              <article className="glass rounded-xl overflow-hidden">
+                {/* Set progress bar */}
+                <div className="flex">
+                  {Array.from({ length: targetSets }).map((_, i) => (
+                    <div key={i} className={`h-1 flex-1 transition-all ${i < currentSet - 1 ? 'bg-green-400' : i === currentSet - 1 ? 'bg-primary' : 'bg-secondary'}`} />
+                  ))}
+                </div>
+                <div className="relative aspect-video bg-secondary/30">
+                  <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" style={{ display: cameraOn ? 'block' : 'none' }} />
+                  <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" style={{ display: cameraOn ? 'block' : 'none', zIndex: 10 }} />
+                  {!cameraOn && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
+                      <Camera className="h-12 w-12 text-muted-foreground" />
+                      <p className="text-sm text-muted-foreground">Camera off</p>
+                      <Button size="sm" className="bg-primary text-primary-foreground" onClick={startCamera}>Enable Camera</Button>
+                    </div>
+                  )}
+                  {/* Rest overlay */}
+                  {isResting && (
+                    <div className="absolute inset-0 bg-black/75 flex flex-col items-center justify-center gap-4 z-20">
+                      <Timer className="h-12 w-12 text-primary animate-pulse" />
+                      <p className="font-display text-5xl font-bold text-primary">{restSecondsLeft}</p>
+                      <p className="text-white text-lg font-medium">Rest — next set starting soon</p>
+                      <Button variant="outline" onClick={() => { clearInterval(restIntervalRef.current!); setIsResting(false); setCurrentSet(s => s + 1); }} className="mt-2 text-white border-white/30">
+                        Skip Rest
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              </article>
+
+              {/* ── Panel ───────────────────────────────── */}
+              <aside className="glass rounded-xl p-4 space-y-4 overflow-y-auto max-h-[80vh]">
+
+                {/* Side selector */}
+                <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                  Facing Side
+                  <select value={side} onChange={e => setSide(e.target.value as Side)}
+                    className="bg-secondary border border-border rounded px-2 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary">
+                    <option value="left">Left</option>
+                    <option value="right">Right</option>
+                  </select>
+                </label>
+
+                {/* Status */}
+                <div className="flex items-center gap-2">
+                  <span className={`w-2 h-2 rounded-full ${isInitialized ? 'bg-green-400' : 'bg-yellow-400'} animate-pulse`} />
+                  <span className="text-xs text-primary font-medium">{statusText}</span>
+                </div>
+
+                {/* Rep progress */}
+                <div className="p-3 border border-border/50 rounded-xl bg-secondary/20 space-y-2">
+                  <div className="flex justify-between items-baseline">
+                    <span className="text-xs text-muted-foreground">Reps this set</span>
+                    <span className="font-display text-2xl font-bold text-primary">{repsInSet} <span className="text-sm text-muted-foreground">/ {targetReps}</span></span>
+                  </div>
+                  <div className="w-full h-2 bg-secondary rounded-full overflow-hidden">
+                    <div className="h-full bg-primary rounded-full transition-all" style={{ width: `${Math.min(100, (repsInSet / targetReps) * 100)}%` }} />
+                  </div>
+                </div>
+
+                {/* Stats */}
+                <div className="grid grid-cols-3 gap-2">
+                  {[
+                    { label: 'State', value: currentResult?.state ?? '–', color: 'text-foreground' },
+                    { label: 'Correct', value: currentResult?.correct ?? 0, color: 'text-green-400' },
+                    { label: 'Incorrect', value: currentResult?.incorrect ?? 0, color: 'text-red-400' },
+                  ].map(s => (
+                    <div key={s.label} className="p-2 border border-border/50 rounded-lg bg-secondary/20 text-center">
+                      <div className="text-xs text-muted-foreground mb-1">{s.label}</div>
+                      <div className={`font-display text-xl font-bold ${s.color}`}>{s.value}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Metrics */}
+                <div className="p-3 border border-border/50 rounded-lg bg-secondary/20">
+                  <div className="text-xs text-muted-foreground mb-1">Metrics</div>
+                  <div className="text-xs font-mono">{currentResult?.metricsText ?? 'Torso: 0.0 | Hip-Knee: 0.0 | Knee-Ankle: 0.0'}</div>
+                </div>
+
+                {/* Demo animation */}
+                <div className="p-2 border border-border/50 rounded-lg bg-secondary/20">
+                  <div className="text-xs text-muted-foreground mb-1">Good Rep Animation</div>
+                  <canvas ref={demoRef} width={296} height={200} className="w-full rounded" />
+                </div>
+
+                {/* Action buttons */}
+                <div className="space-y-2">
+                  <Button size="lg" className="w-full bg-primary text-primary-foreground" onClick={handleStart} disabled={!cameraOn || !isInitialized || isResting}>
+                    {isAnalyzing ? 'Analyzing…' : isResting ? `Resting… ${restSecondsLeft}s` : 'Start Analysis'}
+                  </Button>
+                  {isAnalyzing && (
+                    <Button size="sm" variant="outline" className="w-full" onClick={stopAnalysis}>Pause</Button>
+                  )}
+                  <div className="flex gap-2">
+                    <Button size="sm" variant="ghost" className="flex-1" onClick={() => { resetAnalysis(); setSetBaseCorrect(currentResult?.correct ?? 0); }}>Reset Set</Button>
+                    <Button size="sm" variant="ghost" className="flex-1" onClick={cameraOn ? stopCamera : startCamera}>
+                      {cameraOn ? <><CameraOff className="h-3 w-3 mr-1" />Stop Cam</> : <><Camera className="h-3 w-3 mr-1" />Start Cam</>}
                     </Button>
                   </div>
-                )}
-              </div>
-            </article>
-
-            {/* ── Panel ───────────────────────────────── */}
-            <aside className="glass rounded-xl p-4 space-y-4 overflow-y-auto max-h-[80vh]">
-
-              {/* Side selector */}
-              <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-                Facing Side
-                <select value={side} onChange={e => setSide(e.target.value as Side)}
-                  className="bg-secondary border border-border rounded px-2 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary">
-                  <option value="left">Left</option>
-                  <option value="right">Right</option>
-                </select>
-              </label>
-
-              {/* Status */}
-              <div className="flex items-center gap-2">
-                <span className={`w-2 h-2 rounded-full ${isInitialized ? 'bg-green-400' : 'bg-yellow-400'} animate-pulse`} />
-                <span className="text-xs text-primary font-medium">{statusText}</span>
-              </div>
-
-              {/* Rep progress */}
-              <div className="p-3 border border-border/50 rounded-xl bg-secondary/20 space-y-2">
-                <div className="flex justify-between items-baseline">
-                  <span className="text-xs text-muted-foreground">Reps this set</span>
-                  <span className="font-display text-2xl font-bold text-primary">{repsInSet} <span className="text-sm text-muted-foreground">/ {targetReps}</span></span>
                 </div>
-                <div className="w-full h-2 bg-secondary rounded-full overflow-hidden">
-                  <div className="h-full bg-primary rounded-full transition-all" style={{ width: `${Math.min(100, (repsInSet / targetReps) * 100)}%` }} />
-                </div>
-              </div>
 
-              {/* Stats */}
-              <div className="grid grid-cols-3 gap-2">
-                {[
-                  { label: 'State', value: currentResult?.state ?? '–', color: 'text-foreground' },
-                  { label: 'Correct', value: currentResult?.correct ?? 0, color: 'text-green-400' },
-                  { label: 'Incorrect', value: currentResult?.incorrect ?? 0, color: 'text-red-400' },
-                ].map(s => (
-                  <div key={s.label} className="p-2 border border-border/50 rounded-lg bg-secondary/20 text-center">
-                    <div className="text-xs text-muted-foreground mb-1">{s.label}</div>
-                    <div className={`font-display text-xl font-bold ${s.color}`}>{s.value}</div>
+                {/* Live feedback */}
+                <div className="p-3 border border-border/50 rounded-lg bg-secondary/20">
+                  <div className="flex items-center gap-2 mb-2">
+                    <div className="text-xs text-muted-foreground">Live Feedback</div>
+                    {voiceOn && <Volume2 className="h-3 w-3 text-primary" />}
                   </div>
-                ))}
-              </div>
-
-              {/* Metrics */}
-              <div className="p-3 border border-border/50 rounded-lg bg-secondary/20">
-                <div className="text-xs text-muted-foreground mb-1">Metrics</div>
-                <div className="text-xs font-mono">{currentResult?.metricsText ?? 'Torso: 0.0 | Hip-Knee: 0.0 | Knee-Ankle: 0.0'}</div>
-              </div>
-
-              {/* Demo animation */}
-              <div className="p-2 border border-border/50 rounded-lg bg-secondary/20">
-                <div className="text-xs text-muted-foreground mb-1">Good Rep Animation</div>
-                <canvas ref={demoRef} width={296} height={200} className="w-full rounded" />
-              </div>
-
-              {/* Action buttons */}
-              <div className="space-y-2">
-                <Button size="lg" className="w-full bg-primary text-primary-foreground" onClick={handleStart} disabled={!cameraOn || !isInitialized || isResting}>
-                  {isAnalyzing ? 'Analyzing…' : isResting ? `Resting… ${restSecondsLeft}s` : 'Start Analysis'}
-                </Button>
-                {isAnalyzing && (
-                  <Button size="sm" variant="outline" className="w-full" onClick={stopAnalysis}>Pause</Button>
-                )}
-                <div className="flex gap-2">
-                  <Button size="sm" variant="ghost" className="flex-1" onClick={() => { resetAnalysis(); setSetBaseCorrect(currentResult?.correct ?? 0); }}>Reset Set</Button>
-                  <Button size="sm" variant="ghost" className="flex-1" onClick={cameraOn ? stopCamera : startCamera}>
-                    {cameraOn ? <><CameraOff className="h-3 w-3 mr-1" />Stop Cam</> : <><Camera className="h-3 w-3 mr-1" />Start Cam</>}
-                  </Button>
+                  <ul className="space-y-1">
+                    {feedback.slice(0, 4).map((msg, i) => (
+                      <li key={i} className={`flex items-start gap-2 text-sm ${msg === 'Good form!' ? 'text-green-400' : 'text-yellow-400'}`}>
+                        <span className="mt-0.5">•</span><span>{msg}</span>
+                      </li>
+                    ))}
+                  </ul>
                 </div>
-              </div>
 
-              {/* Live feedback */}
-              <div className="p-3 border border-border/50 rounded-lg bg-secondary/20">
-                <div className="flex items-center gap-2 mb-2">
-                  <div className="text-xs text-muted-foreground">Live Feedback</div>
-                  {voiceOn && <Volume2 className="h-3 w-3 text-primary" />}
-                </div>
-                <ul className="space-y-1">
-                  {feedback.slice(0, 4).map((msg, i) => (
-                    <li key={i} className={`flex items-start gap-2 text-sm ${msg === 'Good form!' ? 'text-green-400' : 'text-yellow-400'}`}>
-                      <span className="mt-0.5">•</span><span>{msg}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-
-            </aside>
-          </section>
+              </aside>
+            </section>
+          </>
         )}
       </div>
     </DashboardLayout>
