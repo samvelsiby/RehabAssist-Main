@@ -1,0 +1,464 @@
+import { useState, useRef, useCallback, useEffect } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import DashboardLayout from '@/components/DashboardLayout';
+import { Button } from '@/components/ui/button';
+import {
+  ArrowLeft, Camera, CameraOff, Activity, Volume2, VolumeX,
+  CheckCircle2, Timer, Dumbbell,
+} from 'lucide-react';
+import { useAssignedExercises, getExerciseRules, type ExerciseMode } from '@/hooks/useExercises';
+import { useLogSession, useTodaySessionLogs } from '@/hooks/useSessionLogs';
+import { useExerciseSession } from '@/hooks/useExerciseSession';
+import { useVoiceAssistant } from '@/hooks/useVoiceAssistant';
+import type { Side } from '@/services/exercises/mini-squat-analyzer';
+import { toast } from '@/components/ui/sonner';
+import type { AnalyzerResult } from '@/utils/exercise-geometry';
+
+// ─── Demo canvas animation (stick figure) ────────────────────────────────────
+function buildJoints(mode: ExerciseMode, t: number) {
+  const ease = (x: number) => x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2;
+  const e = ease(t);
+  const cx = 160; // canvas center-x
+
+  const j: Record<string, { x: number; y: number }> = {
+    head: { x: cx, y: 20 }, lSh: { x: cx - 20, y: 48 }, rSh: { x: cx + 20, y: 48 },
+    lElb: { x: cx - 27, y: 82 }, rElb: { x: cx + 27, y: 82 },
+    lWri: { x: cx - 22, y: 115 }, rWri: { x: cx + 22, y: 115 },
+    lHip: { x: cx - 12, y: 100 }, rHip: { x: cx + 12, y: 100 },
+    lKnee: { x: cx - 14, y: 142 }, rKnee: { x: cx + 14, y: 142 },
+    lAnkle: { x: cx - 12, y: 180 }, rAnkle: { x: cx + 12, y: 180 },
+    lToe: { x: cx - 28, y: 183 }, rToe: { x: cx + 28, y: 183 },
+    lHeel: { x: cx - 2, y: 183 }, rHeel: { x: cx + 2, y: 183 },
+  };
+  if (mode === 'squat') {
+    const d = e * 28; j.lHip = { x: cx - 14 + e * 3, y: 100 + d }; j.rHip = { x: cx + 14 - e * 3, y: 100 + d };
+    j.lKnee = { x: cx - 20 - e * 6, y: 142 + d * 0.55 }; j.rKnee = { x: cx + 20 + e * 6, y: 142 + d * 0.55 };
+  } else if (mode === 'hamstring_curl') {
+    const ang = e * 85 * Math.PI / 180; const sl = 42;
+    j.rAnkle = { x: cx + 14 + Math.sin(ang) * sl * 0.8, y: 142 + Math.cos(ang) * sl };
+    j.rToe = { x: j.rAnkle.x + 16, y: j.rAnkle.y + 3 };
+    j.rHeel = { x: j.rAnkle.x - 2, y: j.rAnkle.y + 3 };
+  } else if (mode === 'heel_raise') {
+    const lift = e * 20;
+    j.lAnkle = { x: cx - 12, y: 180 - lift }; j.rAnkle = { x: cx + 12, y: 180 - lift };
+    j.lKnee = { x: cx - 14, y: 142 - lift * 0.4 }; j.rKnee = { x: cx + 14, y: 142 - lift * 0.4 };
+    j.lHip = { x: cx - 12, y: 100 - lift * 0.2 }; j.rHip = { x: cx + 12, y: 100 - lift * 0.2 };
+    j.lHeel = { x: cx - 2, y: 180 - lift }; j.rHeel = { x: cx + 2, y: 180 - lift };
+  }
+  return j;
+}
+
+function drawDemo(ctx: CanvasRenderingContext2D, mode: ExerciseMode, progress: number) {
+  const W = ctx.canvas.width, H = ctx.canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#0d0d1f'; ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = '#1e1e3f'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(10, H - 12); ctx.lineTo(W - 10, H - 12); ctx.stroke();
+  const PING = progress < 0.5 ? progress * 2 : 2 - progress * 2;
+  const j = buildJoints(mode, PING);
+  const CONNS: [string, string][] = [
+    ['lSh', 'rSh'], ['lSh', 'lHip'], ['rSh', 'rHip'], ['lHip', 'rHip'],
+    ['lSh', 'lElb'], ['lElb', 'lWri'], ['rSh', 'rElb'], ['rElb', 'rWri'],
+    ['head', 'lSh'], ['head', 'rSh'],
+    ['lHip', 'lKnee'], ['lKnee', 'lAnkle'], ['lAnkle', 'lToe'], ['lAnkle', 'lHeel'],
+    ['rHip', 'rKnee'], ['rKnee', 'rAnkle'], ['rAnkle', 'rToe'], ['rAnkle', 'rHeel'],
+  ];
+  ctx.strokeStyle = '#22c55e'; ctx.lineWidth = 2.2;
+  CONNS.forEach(([a, b]) => { if (!j[a] || !j[b]) return; ctx.beginPath(); ctx.moveTo(j[a].x, j[a].y); ctx.lineTo(j[b].x, j[b].y); ctx.stroke(); });
+  ctx.beginPath(); ctx.arc(j.head.x, j.head.y, 10, 0, Math.PI * 2); ctx.fillStyle = '#22c55e'; ctx.fill();
+  ['lHip', 'rHip', 'lKnee', 'rKnee', 'lAnkle', 'rAnkle'].forEach(k => {
+    if (!j[k]) return; ctx.beginPath(); ctx.arc(j[k].x, j[k].y, 4.5, 0, Math.PI * 2); ctx.fillStyle = '#fbbf24'; ctx.fill();
+  });
+  const labels: Record<ExerciseMode, string> = { squat: 'Good Squat', hamstring_curl: 'Good Curl', heel_raise: 'Good Raise' };
+  ctx.fillStyle = '#4ade80'; ctx.font = '600 11px Inter,sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText(labels[mode], W / 2, 13); ctx.textAlign = 'left';
+}
+
+// ─── Exercise pick screen (no assignment) ────────────────────────────────────
+const EXERCISE_CARDS: { id: ExerciseMode; label: string; emoji: string; desc: string }[] = [
+  { id: 'squat', label: 'Squat Analyzer', emoji: '🦵', desc: '3 sets · 8–15 reps · 60 s rest' },
+  { id: 'hamstring_curl', label: 'Standing Hamstring Curl', emoji: '🔁', desc: '3 sets · 10–20 reps · 45 s rest' },
+  { id: 'heel_raise', label: 'Heel Raise', emoji: '⬆️', desc: '3 sets · 12–25 reps · 30 s rest' },
+];
+
+// ─── Component ────────────────────────────────────────────────────────────────
+export default function ExerciseSession() {
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const assignmentId = searchParams.get('assignmentId');
+
+  const { data: assignments = [] } = useAssignedExercises();
+  const { data: todayLogs = [] } = useTodaySessionLogs();
+  const logSession = useLogSession();
+
+  const assignment = assignments.find(a => a.id === assignmentId);
+  // Derive exercise mode from the assignment; fallback allows direct navigation
+  const [chosenMode, setChosenMode] = useState<ExerciseMode | null>(null);
+  const exerciseMode = (assignment?.exercise_id ?? chosenMode) as ExerciseMode | null;
+  const rules = exerciseMode ? getExerciseRules(exerciseMode) : null;
+  const exerciseName = assignment?.exercises?.name ?? (chosenMode ? EXERCISE_CARDS.find(c => c.id === chosenMode)?.label : null);
+
+  // Set tracking (from DB)
+  const setsDoneToday = todayLogs.filter(l => l.assigned_exercise_id === assignmentId).length;
+  const currentSetNumber = setsDoneToday + 1;
+
+  // ── State ──────────────────────────────────────────────────────────────────
+  const [side, setSide] = useState<Side>('left');
+  const [cameraOn, setCameraOn] = useState(false);
+  const [voiceOn, setVoiceOn] = useState(true);
+  const [currentResult, setCurrentResult] = useState<AnalyzerResult | null>(null);
+  const [statusText, setStatusText] = useState('Ready');
+
+  // Per-set rep tracking (setBaseCorrect = correct count at start of current set)
+  const [currentSet, setCurrentSet] = useState(currentSetNumber);
+  const [setBaseCorrect, setSetBaseCorrect] = useState(0);
+  const [isResting, setIsResting] = useState(false);
+  const [restSecondsLeft, setRestSecondsLeft] = useState(0);
+  const restIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const repsInSet = Math.max(0, (currentResult?.correct ?? 0) - setBaseCorrect);
+  const targetReps = rules?.minRepsPerSet ?? 10;
+  const targetSets = assignment?.sets ?? rules?.targetSets ?? 3;
+  const allSetsDone = currentSet > targetSets;
+
+  // ── Refs ───────────────────────────────────────────────────────────────────
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const demoRef = useRef<HTMLCanvasElement>(null);
+  const demoRafRef = useRef<number | null>(null);
+
+  // ── Voice ──────────────────────────────────────────────────────────────────
+  const { announce, announceFeedback, announceRep, cancel: cancelVoice } = useVoiceAssistant(voiceOn);
+
+  // ── Exercise hook ──────────────────────────────────────────────────────────
+  const { initialize, startAnalysis, stopAnalysis, resetAnalysis, isInitialized, isAnalyzing, error: analysisError } =
+    useExerciseSession({
+      exerciseMode: exerciseMode ?? 'squat',
+      side,
+      onResultUpdate: setCurrentResult,
+    });
+
+  // ── Camera ─────────────────────────────────────────────────────────────────
+  const startCamera = useCallback(async () => {
+    try {
+      setStatusText('Starting camera…');
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 960 }, height: { ideal: 540 } },
+      });
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await new Promise<void>(res => {
+          videoRef.current!.onloadedmetadata = () => { videoRef.current!.play().then(res).catch(res); };
+        });
+        setCameraOn(true);
+        setStatusText('Initializing pose engine…');
+        await initialize(); // always await — the hook guards against double-init
+        setStatusText('Ready — click Start Analysis');
+      }
+    } catch (err) {
+      console.error('[startCamera]', err);
+      toast.error('Could not access camera');
+      setStatusText('Camera error');
+    }
+  }, [initialize]);
+
+  const stopCamera = useCallback(() => {
+    stopAnalysis();
+    if (videoRef.current?.srcObject) (videoRef.current.srcObject as MediaStream).getTracks().forEach(t => t.stop());
+    setCameraOn(false);
+    setStatusText('Camera off');
+  }, [stopAnalysis]);
+
+  const handleStart = useCallback(async () => {
+    if (!cameraOn) {
+      await startCamera(); // startCamera awaits initialize internally
+    }
+    if (analysisError) { toast.error(analysisError); return; }
+    if (!videoRef.current || !canvasRef.current) return;
+    resetAnalysis();
+    setSetBaseCorrect(currentResult?.correct ?? 0);
+    startAnalysis(videoRef.current, canvasRef.current);
+    announce(`Starting set ${currentSet}. ${targetReps} reps. Go!`);
+  }, [cameraOn, analysisError, startCamera, resetAnalysis, startAnalysis, announce, currentSet, targetReps, currentResult?.correct]);
+
+  // ── Rest timer ─────────────────────────────────────────────────────────────
+  const startRest = useCallback((restSecs: number) => {
+    stopAnalysis();
+    setIsResting(true);
+    setRestSecondsLeft(restSecs);
+    announce(`Set ${currentSet} complete! Rest for ${restSecs} seconds.`);
+
+    restIntervalRef.current = setInterval(() => {
+      setRestSecondsLeft(prev => {
+        if (prev <= 1) {
+          clearInterval(restIntervalRef.current!);
+          setIsResting(false);
+          setCurrentSet(s => s + 1);
+          announce(`Rest over. Get ready for set ${currentSet + 1}.`);
+          return 0;
+        }
+        if (prev === 6) announce(`${prev - 1} seconds remaining.`);
+        return prev - 1;
+      });
+    }, 1000);
+  }, [stopAnalysis, announce, currentSet]);
+
+  // ── Set completion detection ────────────────────────────────────────────────
+  useEffect(() => {
+    if (!isAnalyzing || isResting || !rules) return;
+    if (repsInSet >= targetReps) {
+      // Log the completed set
+      if (assignmentId) {
+        logSession.mutate({
+          assigned_exercise_id: assignmentId,
+          set_number: currentSet,
+          total_reps: repsInSet,
+          correct_reps: currentResult?.correct ? repsInSet : 0,
+          incorrect_reps: currentResult?.incorrect ?? 0,
+          average_form_score: 85,
+        }, {
+          onSuccess: () => toast.success(`Set ${currentSet} logged!`),
+          onError: e => toast.error('Save failed: ' + e.message),
+        });
+      }
+      if (currentSet >= targetSets) {
+        stopAnalysis();
+        announce('All sets complete! Excellent work!');
+      } else {
+        setSetBaseCorrect(currentResult?.correct ?? 0);
+        startRest(rules.restBetweenSets);
+      }
+    }
+  }, [repsInSet, targetReps]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Voice: feedback + rep announcements ────────────────────────────────────
+  useEffect(() => {
+    if (!currentResult || !voiceOn) return;
+    announceFeedback(currentResult.feedback);
+    announceRep(currentResult.correct - setBaseCorrect, targetReps);
+  }, [currentResult?.feedback?.[0], currentResult?.correct]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Demo canvas loop ────────────────────────────────────────────────────────
+  useEffect(() => {
+    const canvas = demoRef.current; if (!canvas || !exerciseMode) return;
+    const ctx = canvas.getContext('2d'); if (!ctx) return;
+    const CYCLE = 2200; let start: number | null = null;
+    const frame = (ts: number) => {
+      if (!start) start = ts;
+      drawDemo(ctx, exerciseMode, ((ts - start) % CYCLE) / CYCLE);
+      demoRafRef.current = requestAnimationFrame(frame);
+    };
+    demoRafRef.current = requestAnimationFrame(frame);
+    return () => { if (demoRafRef.current) cancelAnimationFrame(demoRafRef.current); };
+  }, [exerciseMode]);
+
+  // ── Auto start camera ───────────────────────────────────────────────────────
+  useEffect(() => { if (exerciseMode) startCamera(); }, [exerciseMode]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => () => { stopCamera(); cancelVoice(); if (restIntervalRef.current) clearInterval(restIntervalRef.current); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Pick screen (no exercise chosen) ───────────────────────────────────────
+  if (!exerciseMode) {
+    return (
+      <DashboardLayout>
+        <div className="max-w-2xl mx-auto">
+          <Button variant="ghost" size="sm" className="mb-6 text-muted-foreground" onClick={() => navigate('/dashboard')}>
+            <ArrowLeft className="h-4 w-4 mr-1" /> Back
+          </Button>
+          <h1 className="font-display text-2xl font-bold mb-2 flex items-center gap-2">
+            <Dumbbell className="h-6 w-6 text-primary" /> Choose Exercise
+          </h1>
+          <p className="text-muted-foreground text-sm mb-8">Select the exercise you want to perform</p>
+          <div className="grid gap-4">
+            {EXERCISE_CARDS.map(c => (
+              <button
+                key={c.id}
+                onClick={() => setChosenMode(c.id)}
+                className="glass rounded-xl p-5 text-left hover:border-primary/50 border border-border/40 transition-all group"
+              >
+                <div className="flex items-center gap-4">
+                  <span className="text-3xl">{c.emoji}</span>
+                  <div>
+                    <p className="font-display font-semibold group-hover:text-primary transition-colors">{c.label}</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">{c.desc}</p>
+                  </div>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      </DashboardLayout>
+    );
+  }
+
+  const feedback = currentResult?.feedback ?? ['Waiting for pose…'];
+
+  // ── Session UI ──────────────────────────────────────────────────────────────
+  return (
+    <DashboardLayout>
+      <div className="max-w-6xl mx-auto">
+        <Button variant="ghost" size="sm" className="mb-4 text-muted-foreground" onClick={() => navigate('/dashboard')}>
+          <ArrowLeft className="h-4 w-4 mr-1" /> Back to Dashboard
+        </Button>
+
+        {/* Header */}
+        <div className="mb-5 flex items-start justify-between">
+          <div>
+            <h1 className="font-display text-2xl font-bold flex items-center gap-2">
+              <Activity className="h-6 w-6 text-primary" />
+              {exerciseName ?? 'Exercise Analyzer'}
+            </h1>
+            <p className="text-muted-foreground text-sm mt-1">
+              MediaPipe real-time pose feedback · Set <span className="text-primary font-semibold">{Math.min(currentSet, targetSets)}</span> of <span className="font-semibold">{targetSets}</span>
+              {rules && <> · {targetReps} reps per set · {rules.restBetweenSets}s rest</>}
+            </p>
+          </div>
+          {/* Voice toggle */}
+          <Button
+            variant="outline" size="sm"
+            onClick={() => { setVoiceOn(v => !v); if (voiceOn) cancelVoice(); }}
+            className={voiceOn ? 'border-primary text-primary' : 'text-muted-foreground'}
+          >
+            {voiceOn ? <Volume2 className="h-4 w-4 mr-1" /> : <VolumeX className="h-4 w-4 mr-1" />}
+            {voiceOn ? 'Voice On' : 'Voice Off'}
+          </Button>
+        </div>
+
+        {/* All sets done */}
+        {allSetsDone ? (
+          <div className="glass rounded-xl p-10 text-center">
+            <CheckCircle2 className="h-16 w-16 text-green-400 mx-auto mb-4" />
+            <h2 className="font-display text-2xl font-bold text-green-400 mb-2">All {targetSets} Sets Complete! 🎉</h2>
+            <p className="text-muted-foreground mb-6">Outstanding work. Your session has been saved.</p>
+            <Button onClick={() => navigate('/dashboard')} className="bg-primary text-primary-foreground">
+              Back to Dashboard
+            </Button>
+          </div>
+        ) : (
+          <section className="grid lg:grid-cols-[1.9fr_1fr] gap-4">
+
+            {/* ── Video ───────────────────────────────── */}
+            <article className="glass rounded-xl overflow-hidden">
+              {/* Set progress bar */}
+              <div className="flex">
+                {Array.from({ length: targetSets }).map((_, i) => (
+                  <div key={i} className={`h-1 flex-1 transition-all ${i < currentSet - 1 ? 'bg-green-400' : i === currentSet - 1 ? 'bg-primary' : 'bg-secondary'}`} />
+                ))}
+              </div>
+              <div className="relative aspect-video bg-secondary/30">
+                <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" style={{ display: cameraOn ? 'block' : 'none' }} />
+                <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" style={{ display: cameraOn ? 'block' : 'none', zIndex: 10 }} />
+                {!cameraOn && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
+                    <Camera className="h-12 w-12 text-muted-foreground" />
+                    <p className="text-sm text-muted-foreground">Camera off</p>
+                    <Button size="sm" className="bg-primary text-primary-foreground" onClick={startCamera}>Enable Camera</Button>
+                  </div>
+                )}
+                {/* Rest overlay */}
+                {isResting && (
+                  <div className="absolute inset-0 bg-black/75 flex flex-col items-center justify-center gap-4 z-20">
+                    <Timer className="h-12 w-12 text-primary animate-pulse" />
+                    <p className="font-display text-5xl font-bold text-primary">{restSecondsLeft}</p>
+                    <p className="text-white text-lg font-medium">Rest — next set starting soon</p>
+                    <Button variant="outline" onClick={() => { clearInterval(restIntervalRef.current!); setIsResting(false); setCurrentSet(s => s + 1); }} className="mt-2 text-white border-white/30">
+                      Skip Rest
+                    </Button>
+                  </div>
+                )}
+              </div>
+            </article>
+
+            {/* ── Panel ───────────────────────────────── */}
+            <aside className="glass rounded-xl p-4 space-y-4 overflow-y-auto max-h-[80vh]">
+
+              {/* Side selector */}
+              <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                Facing Side
+                <select value={side} onChange={e => setSide(e.target.value as Side)}
+                  className="bg-secondary border border-border rounded px-2 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary">
+                  <option value="left">Left</option>
+                  <option value="right">Right</option>
+                </select>
+              </label>
+
+              {/* Status */}
+              <div className="flex items-center gap-2">
+                <span className={`w-2 h-2 rounded-full ${isInitialized ? 'bg-green-400' : 'bg-yellow-400'} animate-pulse`} />
+                <span className="text-xs text-primary font-medium">{statusText}</span>
+              </div>
+
+              {/* Rep progress */}
+              <div className="p-3 border border-border/50 rounded-xl bg-secondary/20 space-y-2">
+                <div className="flex justify-between items-baseline">
+                  <span className="text-xs text-muted-foreground">Reps this set</span>
+                  <span className="font-display text-2xl font-bold text-primary">{repsInSet} <span className="text-sm text-muted-foreground">/ {targetReps}</span></span>
+                </div>
+                <div className="w-full h-2 bg-secondary rounded-full overflow-hidden">
+                  <div className="h-full bg-primary rounded-full transition-all" style={{ width: `${Math.min(100, (repsInSet / targetReps) * 100)}%` }} />
+                </div>
+              </div>
+
+              {/* Stats */}
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { label: 'State', value: currentResult?.state ?? '–', color: 'text-foreground' },
+                  { label: 'Correct', value: currentResult?.correct ?? 0, color: 'text-green-400' },
+                  { label: 'Incorrect', value: currentResult?.incorrect ?? 0, color: 'text-red-400' },
+                ].map(s => (
+                  <div key={s.label} className="p-2 border border-border/50 rounded-lg bg-secondary/20 text-center">
+                    <div className="text-xs text-muted-foreground mb-1">{s.label}</div>
+                    <div className={`font-display text-xl font-bold ${s.color}`}>{s.value}</div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Metrics */}
+              <div className="p-3 border border-border/50 rounded-lg bg-secondary/20">
+                <div className="text-xs text-muted-foreground mb-1">Metrics</div>
+                <div className="text-xs font-mono">{currentResult?.metricsText ?? 'Torso: 0.0 | Hip-Knee: 0.0 | Knee-Ankle: 0.0'}</div>
+              </div>
+
+              {/* Demo animation */}
+              <div className="p-2 border border-border/50 rounded-lg bg-secondary/20">
+                <div className="text-xs text-muted-foreground mb-1">Good Rep Animation</div>
+                <canvas ref={demoRef} width={296} height={200} className="w-full rounded" />
+              </div>
+
+              {/* Action buttons */}
+              <div className="space-y-2">
+                <Button size="lg" className="w-full bg-primary text-primary-foreground" onClick={handleStart} disabled={!cameraOn || !isInitialized || isResting}>
+                  {isAnalyzing ? 'Analyzing…' : isResting ? `Resting… ${restSecondsLeft}s` : 'Start Analysis'}
+                </Button>
+                {isAnalyzing && (
+                  <Button size="sm" variant="outline" className="w-full" onClick={stopAnalysis}>Pause</Button>
+                )}
+                <div className="flex gap-2">
+                  <Button size="sm" variant="ghost" className="flex-1" onClick={() => { resetAnalysis(); setSetBaseCorrect(currentResult?.correct ?? 0); }}>Reset Set</Button>
+                  <Button size="sm" variant="ghost" className="flex-1" onClick={cameraOn ? stopCamera : startCamera}>
+                    {cameraOn ? <><CameraOff className="h-3 w-3 mr-1" />Stop Cam</> : <><Camera className="h-3 w-3 mr-1" />Start Cam</>}
+                  </Button>
+                </div>
+              </div>
+
+              {/* Live feedback */}
+              <div className="p-3 border border-border/50 rounded-lg bg-secondary/20">
+                <div className="flex items-center gap-2 mb-2">
+                  <div className="text-xs text-muted-foreground">Live Feedback</div>
+                  {voiceOn && <Volume2 className="h-3 w-3 text-primary" />}
+                </div>
+                <ul className="space-y-1">
+                  {feedback.slice(0, 4).map((msg, i) => (
+                    <li key={i} className={`flex items-start gap-2 text-sm ${msg === 'Good form!' ? 'text-green-400' : 'text-yellow-400'}`}>
+                      <span className="mt-0.5">•</span><span>{msg}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+            </aside>
+          </section>
+        )}
+      </div>
+    </DashboardLayout>
+  );
+}
