@@ -61,7 +61,7 @@ export default function Progress() {
   const byExercise = useMemo(() => {
     const map: Record<string, { correct: number; incorrect: number; sets: number }> = {};
     allLogs.forEach((l) => {
-      const name = (l as unknown as { assigned_exercises?: { exercises?: { name?: string } } }).assigned_exercises?.exercises?.name ?? "Unknown";
+      const name = (l as any).assigned_exercises?.exercises?.name ?? "Unknown";
       if (!map[name]) map[name] = { correct: 0, incorrect: 0, sets: 0 };
       map[name].correct += l.correct_reps;
       map[name].incorrect += l.incorrect_reps;

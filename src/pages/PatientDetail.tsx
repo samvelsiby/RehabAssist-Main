@@ -117,7 +117,7 @@ export default function PatientDetail() {
       toast.success("Exercise assigned!");
       setAssignDialogOpen(false);
       setAssignForm({ exercise_id: "", sets: "3", reps: "12" });
-    } catch (err: unknown) {
+    } catch (err: any) {
       toast.error(err.message || "Failed to assign");
     }
   };

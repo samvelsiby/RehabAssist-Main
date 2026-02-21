@@ -4,12 +4,13 @@ import DashboardLayout from '@/components/DashboardLayout';
 import { Button } from '@/components/ui/button';
 import {
   ArrowLeft, Camera, CameraOff, Activity, Volume2, VolumeX,
-  CheckCircle2, Timer, Dumbbell,
+  CheckCircle2, Timer, Dumbbell, Sparkles,
 } from 'lucide-react';
 import { useAssignedExercises, getExerciseRules, type ExerciseMode } from '@/hooks/useExercises';
 import { useLogSession, useTodaySessionLogs } from '@/hooks/useSessionLogs';
 import { useExerciseSession } from '@/hooks/useExerciseSession';
 import { useVoiceAssistant } from '@/hooks/useVoiceAssistant';
+import { useGeminiCoach } from '@/hooks/useGeminiCoach';
 import type { Side } from '@/services/exercises/mini-squat-analyzer';
 import { toast } from '@/components/ui/sonner';
 import type { AnalyzerResult } from '@/utils/exercise-geometry';
@@ -147,11 +148,19 @@ export default function ExerciseSession() {
   const demoRef = useRef<HTMLCanvasElement>(null);
   const demoRafRef = useRef<number | null>(null);
 
-  // ── Voice assistant ──────────────────────────────────────────────────────
+  // ── Voice + Gemini coach ──────────────────────────────────────────────────
   const { announce, announceFeedback, announceRep, cancel: cancelVoice } = useVoiceAssistant(voiceOn);
+  const API_KEY = import.meta.env.VITE_GEMINI_API_KEY as string | undefined;
 
-  // Track feedback changes
+  const { coachSetComplete, coachSessionComplete, coachFormIssue, generateSetSummary, generateSessionSummary } =
+    useGeminiCoach({
+      onCoach: (text) => { if (voiceOn) announce(text); },
+      enabled: voiceOn,
+    });
+
+  // Track feedback changes for Gemini live coaching
   const lastFeedbackRef = useRef<string>('');
+  const formIssueCountRef = useRef(0);
 
   // ── Exercise hook ──────────────────────────────────────────────────────────
   const { initialize, startAnalysis, stopAnalysis, resetAnalysis, isInitialized, isAnalyzing, error: analysisError } =
@@ -273,35 +282,65 @@ export default function ExerciseSession() {
     });
 
     if (currentSet >= targetSets) {
-      // ── Session complete ──────────────────────────────────────────────────
-      announce('All sets complete! Excellent work!');
-      
-      // Generate basic session summary
-      const totalCorrect = setLogsRef.current.reduce((s, e) => s + e.correctReps, 0);
-      const totalReps = setLogsRef.current.reduce((s, e) => s + e.correctReps + e.incorrectReps, 0);
-      const accuracy = totalReps > 0 ? Math.round((totalCorrect / totalReps) * 100) : 100;
-      const allIssues = Array.from(sessionIssueCountRef.current.entries())
-        .map(([issue, count]) => ({ issue, count }))
-        .sort((a, b) => b.count - a.count);
-      
-      const summary = `## Session Complete\n\n**Exercise:** ${exerciseName}\n**Sets Completed:** ${targetSets}\n**Total Reps:** ${totalCorrect} correct, ${totalReps - totalCorrect} incorrect\n**Accuracy:** ${accuracy}%\n\n${allIssues.length > 0 ? '**Common Form Issues:**\n' + allIssues.map(i => `- ${i.issue} (${i.count} times)`).join('\n') : '**Excellent form throughout!**'}`;
-      
-      setSessionSummary(summary);
-      setSummaryLoading(false);
-    } else {
-      // ── Set complete ──────────────────────────────────────────────────────
-      announce(`Set ${currentSet} complete!`);
-      
-      // Generate basic set summary
-      const accuracy = (correctInSet + incorrectInSet) > 0 ? Math.round((correctInSet / (correctInSet + incorrectInSet)) * 100) : 100;
-      const basicSummary = `Set ${currentSet}: ${correctInSet} correct reps, ${accuracy}% accuracy. ${issuesThisSet.length > 0 ? 'Focus on: ' + issuesThisSet.slice(0, 2).join(', ') : 'Great form!'}`;
+      // ── Session done: voice announcement + generate written summary ──────
+      if (voiceOn) {
+        coachSessionComplete({
+          totalSets: targetSets,
+          totalCorrect: setLogsRef.current.reduce((s, e) => s + e.correctReps, 0),
+          totalReps: setLogsRef.current.reduce((s, e) => s + e.correctReps + e.incorrectReps, 0),
+          exerciseName: exerciseName ?? 'exercise',
+        });
+      } else {
+        announce('All sets complete! Excellent work!');
+      }
 
-      // Show popup with basic summary
+      // Generate detailed written summary with Gemini
+      if (API_KEY) {
+        setSummaryLoading(true);
+        const allIssues = Array.from(sessionIssueCountRef.current.entries())
+          .map(([issue, count]) => ({ issue, count }))
+          .sort((a, b) => b.count - a.count);
+        generateSessionSummary({
+          exerciseName: exerciseName ?? 'Exercise',
+          sets: setLogsRef.current,
+          allIssues,
+        }).then(text => {
+          setSessionSummary(text || null);
+          setSummaryLoading(false);
+        });
+      }
+    } else {
+      // ── Set done: voice + per-set popup with AI summary ──────────────────
+      if (voiceOn) {
+        coachSetComplete({
+          setNumber: currentSet, totalSets: targetSets,
+          correctReps: correctInSet, incorrectReps: incorrectInSet,
+          exerciseName: exerciseName ?? 'exercise',
+          formIssues: issuesThisSet,
+        });
+      } else {
+        announce(`Set ${currentSet} complete!`);
+      }
+
+      // Show popup immediately in loading state
       setSetPopup({
         setNumber: currentSet, totalSets: targetSets,
         correct: correctInSet, incorrect: incorrectInSet, formScore,
-        issues: issuesThisSet, summary: basicSummary, loading: false,
+        issues: issuesThisSet, summary: null, loading: true,
       });
+
+      // Generate per-set summary in parallel with rest timer
+      if (API_KEY) {
+        generateSetSummary({
+          setNumber: currentSet, totalSets: targetSets,
+          correctReps: correctInSet, incorrectReps: incorrectInSet, formScore,
+          exerciseName: exerciseName ?? 'Exercise', issues: issuesThisSet,
+        }).then(text => {
+          setSetPopup(prev => prev ? { ...prev, summary: text || null, loading: false } : null);
+        });
+      } else {
+        setSetPopup(prev => prev ? { ...prev, loading: false } : null);
+      }
 
       setSetBaseCorrect(currentResult?.correct ?? 0);
       startRest(rules.restBetweenSets);
@@ -322,11 +361,18 @@ export default function ExerciseSession() {
       // Track session-wide issue frequency
       sessionIssueCountRef.current.set(issue, (sessionIssueCountRef.current.get(issue) ?? 0) + 1);
 
-      // Track form issues
-      if (issue !== lastFeedbackRef.current) {
+      // Ask Gemini for a coaching tip after 4 consecutive same-issue frames
+      if (issue === lastFeedbackRef.current) {
+        formIssueCountRef.current += 1;
+        if (formIssueCountRef.current === 4 && isAnalyzing) {
+          coachFormIssue(issue, exerciseName ?? 'exercise');
+        }
+      } else {
         lastFeedbackRef.current = issue;
+        formIssueCountRef.current = 1;
       }
     } else {
+      formIssueCountRef.current = 0;
       lastFeedbackRef.current = '';
     }
   }, [currentResult?.feedback?.[0], currentResult?.correct]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -492,7 +538,9 @@ export default function ExerciseSession() {
                 </div>
               ) : (
                 <p className="text-sm text-muted-foreground">
-                  'Session summary not available.'
+                  {API_KEY
+                    ? 'Summary generation failed — check your Gemini API key.'
+                    : 'Add VITE_GEMINI_API_KEY to .env.local to enable AI summaries.'}
                 </p>
               )}
             </div>
@@ -564,8 +612,8 @@ export default function ExerciseSession() {
                   {/* AI Summary */}
                   <div className="rounded-lg bg-primary/5 border border-primary/15 p-4 mb-5">
                     <div className="flex items-center gap-1.5 mb-2">
-                      <Activity className="h-3.5 w-3.5 text-primary" />
-                      <span className="text-xs font-semibold text-primary">Set Summary</span>
+                      <Sparkles className="h-3.5 w-3.5 text-primary" />
+                      <span className="text-xs font-semibold text-primary">AI Coach</span>
                     </div>
                     {setPopup.loading ? (
                       <div className="flex items-center gap-2">
@@ -575,7 +623,7 @@ export default function ExerciseSession() {
                     ) : setPopup.summary ? (
                       <p className="text-sm text-muted-foreground leading-relaxed">{setPopup.summary}</p>
                     ) : (
-                      <p className="text-xs text-muted-foreground">Basic exercise feedback.</p>
+                      <p className="text-xs text-muted-foreground">Add VITE_GEMINI_API_KEY for AI coaching.</p>
                     )}
                   </div>
 
