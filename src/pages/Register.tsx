@@ -53,7 +53,7 @@ export default function Register() {
         <div className="glass rounded-2xl p-8 glow-teal">
           <div className="flex items-center gap-2 mb-6">
             <Activity className="h-5 w-5 text-primary" />
-            <span className="font-display text-lg font-bold text-gradient-teal">ReForm ACL</span>
+            <span className="font-display text-lg font-bold text-gradient-teal">RehabAssist</span>
           </div>
 
           <h2 className="font-display text-2xl font-bold mb-1">Create Account</h2>

@@ -75,7 +75,7 @@ export default function Landing() {
         >
           <Activity className="h-6 w-6 text-primary" />
           <span className="font-display text-xl font-bold text-gradient-teal">
-            ReForm ACL
+            RehabAssist
           </span>
         </motion.div>
         <motion.div
@@ -254,11 +254,11 @@ export default function Landing() {
           <div className="flex items-center gap-2">
             <Activity className="h-4 w-4 text-primary" />
             <span className="font-display text-sm font-semibold text-gradient-teal">
-              ReForm ACL
+              RehabAssist
             </span>
           </div>
           <p className="text-xs text-muted-foreground">
-            © 2026 ReForm ACL. AI-Powered Rehabilitation Platform.
+            © 2026 RehabAssist. AI-Powered Rehabilitation Platform.
           </p>
         </div>
       </footer>

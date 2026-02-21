@@ -37,7 +37,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       {/* Sidebar */}
       <aside className="hidden md:flex w-64 flex-col glass-strong border-r border-border/30 p-4">
         <div className="mb-8 px-2">
-          <h1 className="font-display text-xl font-bold text-gradient-teal">ReForm ACL</h1>
+          <h1 className="font-display text-xl font-bold text-gradient-teal">RehabAssist</h1>
           <p className="text-xs text-muted-foreground mt-1">
             {user?.role === "physio" ? "Physiotherapist" : "Client"} Portal
           </p>
@@ -85,7 +85,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
       {/* Mobile header */}
       <div className="md:hidden fixed top-0 left-0 right-0 z-50 glass-strong border-b border-border/30 px-4 py-3 flex items-center justify-between">
-        <h1 className="font-display text-lg font-bold text-gradient-teal">ReForm ACL</h1>
+        <h1 className="font-display text-lg font-bold text-gradient-teal">RehabAssist</h1>
         <Button variant="ghost" size="sm" onClick={() => { logout(); navigate("/"); }}>
           <LogOut className="h-4 w-4" />
         </Button>
